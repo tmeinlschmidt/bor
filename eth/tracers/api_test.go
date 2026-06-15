@@ -259,7 +259,11 @@ func newStateTracer(ctx *Context, cfg json.RawMessage, chainCfg *params.ChainCon
 }
 
 func TestStateHooks(t *testing.T) {
-	t.Parallel()
+	// NOTE: intentionally NOT parallel. This test mutates the global
+	// DefaultDirectory via Register("stateTracer", ...). Running it in the
+	// parallel phase races with other tracing tests that read the directory
+	// (directory.IsJS/New) from worker goroutines. Keeping it sequential makes
+	// the global write happen-before any parallel reader resumes.
 
 	// Initialize test accounts
 	var (
