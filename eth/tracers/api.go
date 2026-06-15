@@ -1680,24 +1680,11 @@ func (api *API) traceBlockParityByHash(ctx context.Context, hash common.Hash, co
 		core.ProcessParentBlockHash(block.ParentHash(), evm)
 	}
 
-	// Force the callTracer regardless of the caller-supplied tracer: the Parity
-	// conversion needs a structured call frame. Reexec/Timeout are honoured.
-	callTracer := "callTracer"
-	traceConfig := &TraceConfig{
-		Tracer:       &callTracer,
-		TracerConfig: json.RawMessage(`{}`),
-	}
-	if config != nil {
-		traceConfig.Reexec = config.Reexec
-		traceConfig.Timeout = config.Timeout
-	}
-
 	var (
 		txs               = block.Transactions()
 		signer            = types.MakeSigner(api.backend.ChainConfig(), block.Number(), block.Time())
 		allTraces         = make([]*ParityTrace, 0)
 		blockHash         = block.Hash()
-		blockNumber       = block.NumberU64()
 		cumulativeGasUsed uint64
 	)
 
@@ -1707,48 +1694,21 @@ func (api *API) traceBlockParityByHash(ctx context.Context, hash common.Hash, co
 			return nil, fmt.Errorf("failed to convert tx to message (tx %d): %w", txIndex, err)
 		}
 
-		txHash := tx.Hash()
 		txctx := &Context{
 			BlockHash:         blockHash,
 			BlockNumber:       block.Number(),
 			TxIndex:           txIndex,
-			TxHash:            txHash,
+			TxHash:            tx.Hash(),
 			CumulativeGasUsed: cumulativeGasUsed,
 			LogIndex:          len(statedb.Logs()),
 		}
 
-		res, gasUsed, err := api.traceTx(ctx, tx, message, txctx, blockCtx, statedb, traceConfig, nil)
+		// trace_block includes block/transaction identifiers on each entry.
+		txTraces, _, gasUsed, err := api.parityTraceTx(ctx, tx, message, txctx, blockCtx, statedb, config, true)
 		if err != nil {
 			return nil, fmt.Errorf("failed to trace tx %d: %w", txIndex, err)
 		}
 		cumulativeGasUsed += gasUsed
-
-		// The callTracer returns its result as json.RawMessage; marshal defensively
-		// in case a future tracer returns a concrete type.
-		raw, ok := res.(json.RawMessage)
-		if !ok {
-			if raw, err = json.Marshal(res); err != nil {
-				return nil, fmt.Errorf("failed to marshal trace result for tx %d: %w", txIndex, err)
-			}
-		}
-
-		var callFrame map[string]interface{}
-		if err := json.Unmarshal(raw, &callFrame); err != nil {
-			return nil, fmt.Errorf("failed to unmarshal trace result for tx %d: %w", txIndex, err)
-		}
-
-		txTraces, err := convertCallFrameToParityTraces(
-			callFrame,
-			[]uint64{},
-			txHash,
-			uint64(txIndex),
-			blockHash,
-			blockNumber,
-			tx,
-		)
-		if err != nil {
-			return nil, fmt.Errorf("failed to convert trace for tx %d: %w", txIndex, err)
-		}
 
 		allTraces = append(allTraces, txTraces...)
 	}
