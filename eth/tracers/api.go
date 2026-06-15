@@ -217,6 +217,45 @@ type txTraceTask struct {
 	index   int            // Transaction offset in the block
 }
 
+// ParityTrace represents a single trace entry in the Parity/OpenEthereum format.
+// Used by trace_block and other trace_* methods for compatibility with Polygon Erigon.
+type ParityTrace struct {
+	Action              *ParityTraceAction `json:"action,omitempty"`
+	BlockHash           *common.Hash       `json:"blockHash,omitempty"`
+	BlockNumber         *uint64            `json:"blockNumber,omitempty"`
+	Error               *string            `json:"error,omitempty"`
+	Result              *ParityTraceResult `json:"result,omitempty"`
+	Subtraces           uint64             `json:"subtraces"`
+	TraceAddress        []uint64           `json:"traceAddress"`
+	TransactionHash     *common.Hash       `json:"transactionHash,omitempty"`
+	TransactionPosition *uint64            `json:"transactionPosition,omitempty"`
+	Type                string             `json:"type"`
+}
+
+// ParityTraceAction represents the action field in a Parity trace.
+type ParityTraceAction struct {
+	From          *common.Address `json:"from,omitempty"`
+	To            *common.Address `json:"to,omitempty"`
+	CallType      *string         `json:"callType,omitempty"`
+	Gas           *hexutil.Uint64 `json:"gas,omitempty"`
+	Input         *hexutil.Bytes  `json:"input,omitempty"`
+	Value         *hexutil.Big    `json:"value,omitempty"`
+	Init          *hexutil.Bytes  `json:"init,omitempty"`
+	Address       *common.Address `json:"address,omitempty"`
+	RefundAddress *common.Address `json:"refundAddress,omitempty"`
+	Balance       *hexutil.Big    `json:"balance,omitempty"`
+	Author        *common.Address `json:"author,omitempty"`
+	RewardType    *string         `json:"rewardType,omitempty"`
+}
+
+// ParityTraceResult represents the result field in a Parity trace.
+type ParityTraceResult struct {
+	GasUsed *hexutil.Uint64 `json:"gasUsed,omitempty"`
+	Output  *hexutil.Bytes  `json:"output,omitempty"`
+	Address *common.Address `json:"address,omitempty"`
+	Code    *hexutil.Bytes  `json:"code,omitempty"`
+}
+
 // TraceChain returns the structured logs created during the execution of EVM
 // between two blocks (excluding start) and returns them as a JSON object.
 func (api *API) TraceChain(ctx context.Context, start, end rpc.BlockNumber, config *TraceConfig) (*rpc.Subscription, error) { // Fetch the block interval that we want to trace
@@ -1283,12 +1322,29 @@ func (api *API) traceTx(ctx context.Context, tx *types.Transaction, message *cor
 }
 
 // APIs return the collection of RPC services the tracer package offers.
+// TraceAPI is the collection of tracing APIs exposed over the RPC interface.
+// Compatible with Parity/OpenEthereum trace_* methods.
+type TraceAPI struct {
+	*API
+}
+
+// Block returns Parity-format traces for all transactions in the specified block.
+// This method implements the trace_block RPC method for Polygon Erigon compatibility.
+func (api *TraceAPI) Block(ctx context.Context, number rpc.BlockNumber) ([]*ParityTrace, error) {
+	return api.TraceBlockParity(ctx, number, nil)
+}
+
 func APIs(backend Backend) []rpc.API {
+	api := NewAPI(backend)
 	// Append all the local APIs and return
 	return []rpc.API{
 		{
 			Namespace: "debug",
-			Service:   NewAPI(backend),
+			Service:   api,
+		},
+		{
+			Namespace: "trace",
+			Service:   &TraceAPI{API: api},
 		},
 	}
 }
@@ -1353,4 +1409,349 @@ func overrideConfig(original *params.ChainConfig, override *params.ChainConfig) 
 	}
 
 	return chainConfigCopy, canon
+}
+
+// convertCallFrameToParityTraces converts a callFrame from the callTracer to Parity format traces.
+// It recursively flattens nested calls and assigns proper traceAddress indices.
+// The tx parameter is used to calculate intrinsic gas for the top-level call (when traceAddress is empty).
+func convertCallFrameToParityTraces(
+	frame map[string]interface{},
+	traceAddress []uint64,
+	txHash common.Hash,
+	txIndex uint64,
+	blockHash common.Hash,
+	blockNumber uint64,
+	tx *types.Transaction,
+) ([]*ParityTrace, error) {
+	traces := make([]*ParityTrace, 0)
+
+	// Extract frame fields
+	typeStr, _ := frame["type"].(string)
+	fromAddr, _ := frame["from"].(string)
+	errorStr, _ := frame["error"].(string)
+	calls, _ := frame["calls"].([]interface{})
+
+	// Helper to extract string value (handles both string and potential numeric types)
+	getString := func(key string) string {
+		if val, ok := frame[key]; ok && val != nil {
+			// Try string first
+			if str, ok := val.(string); ok {
+				return str
+			}
+			// Try float64 (JSON numbers unmarshal to float64)
+			if num, ok := val.(float64); ok {
+				return hexutil.EncodeUint64(uint64(num))
+			}
+			// Try direct uint64
+			if num, ok := val.(uint64); ok {
+				return hexutil.EncodeUint64(num)
+			}
+		}
+		return ""
+	}
+
+	gasUsed := getString("gasUsed")
+	gas := getString("gas")
+	input := getString("input")
+	output := getString("output")
+	value := getString("value")
+
+	// For top-level call (depth 0), the callTracer sets gas to tx.gasLimit.
+	// But Parity format needs the actual gas forwarded to the call (gasLimit - intrinsicGas).
+	// Calculate intrinsic gas and adjust if this is the top-level call.
+	if len(traceAddress) == 0 && tx != nil && gas != "" {
+		gasVal, err := hexutil.DecodeUint64(gas)
+		if err == nil {
+			// Calculate intrinsic gas
+			intrinsicGas := uint64(21000) // Base transaction cost
+			if tx.Data() != nil {
+				for _, b := range tx.Data() {
+					if b == 0 {
+						intrinsicGas += 4
+					} else {
+						intrinsicGas += 16
+					}
+				}
+			}
+			// For contract creation, add creation gas
+			if tx.To() == nil {
+				intrinsicGas += 32000
+			}
+			// Gas forwarded to the call is tx.gasLimit - intrinsicGas
+			if gasVal > intrinsicGas {
+				gasForwarded := gasVal - intrinsicGas
+				gas = hexutil.EncodeUint64(gasForwarded)
+			}
+		}
+	}
+
+	// Determine trace type
+	traceType := "call"
+	var callType *string
+	if typeStr == "CREATE" || typeStr == "CREATE2" {
+		traceType = "create"
+	} else if typeStr == "SELFDESTRUCT" || typeStr == "SUICIDE" {
+		traceType = "suicide"
+	} else {
+		// For call-like operations
+		ct := "call"
+		if typeStr == "DELEGATECALL" {
+			ct = "delegatecall"
+		} else if typeStr == "STATICCALL" {
+			ct = "staticcall"
+		} else if typeStr == "CALLCODE" {
+			ct = "callcode"
+		}
+		callType = &ct
+	}
+
+	// Build ParityTrace
+	trace := &ParityTrace{
+		Type:                traceType,
+		TraceAddress:        append([]uint64{}, traceAddress...),
+		Subtraces:           uint64(len(calls)),
+		TransactionHash:     &txHash,
+		TransactionPosition: &txIndex,
+		BlockHash:           &blockHash,
+		BlockNumber:         &blockNumber,
+	}
+
+	// Build Action
+	action := &ParityTraceAction{}
+	if fromAddr != "" {
+		from := common.HexToAddress(fromAddr)
+		action.From = &from
+	}
+
+	if toAddr, ok := frame["to"].(string); ok && toAddr != "" {
+		to := common.HexToAddress(toAddr)
+		action.To = &to
+	}
+
+	if gas != "" {
+		if g, err := hexutil.DecodeUint64(gas); err == nil {
+			gasHex := hexutil.Uint64(g)
+			action.Gas = &gasHex
+		}
+	}
+
+	if input != "" {
+		inputBytes := hexutil.MustDecode(input)
+		if traceType == "create" {
+			action.Init = (*hexutil.Bytes)(&inputBytes)
+		} else {
+			action.Input = (*hexutil.Bytes)(&inputBytes)
+		}
+	}
+
+	if value != "" {
+		if val, ok := new(big.Int).SetString(value, 0); ok {
+			bigVal := (*hexutil.Big)(val)
+			action.Value = bigVal
+		}
+	}
+
+	if callType != nil {
+		action.CallType = callType
+	}
+
+	trace.Action = action
+
+	// Build Result (if no error)
+	if errorStr == "" {
+		result := &ParityTraceResult{}
+		if gasUsed != "" {
+			if gu, err := hexutil.DecodeUint64(gasUsed); err == nil {
+				guHex := hexutil.Uint64(gu)
+				result.GasUsed = &guHex
+			}
+		}
+		if output != "" {
+			outputBytes := hexutil.MustDecode(output)
+			if traceType == "create" {
+				result.Code = (*hexutil.Bytes)(&outputBytes)
+				if toAddr, ok := frame["to"].(string); ok && toAddr != "" {
+					addr := common.HexToAddress(toAddr)
+					result.Address = &addr
+				}
+			} else {
+				result.Output = (*hexutil.Bytes)(&outputBytes)
+			}
+		}
+		trace.Result = result
+	} else {
+		// Set error
+		trace.Error = &errorStr
+	}
+
+	// Add current trace
+	traces = append(traces, trace)
+
+	// Recursively process subcalls
+	for i, call := range calls {
+		callMap, ok := call.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		subAddress := append(append([]uint64{}, traceAddress...), uint64(i))
+		subTraces, err := convertCallFrameToParityTraces(
+			callMap,
+			subAddress,
+			txHash,
+			txIndex,
+			blockHash,
+			blockNumber,
+			nil, // tx is only needed for top-level call
+		)
+		if err != nil {
+			return nil, err
+		}
+		traces = append(traces, subTraces...)
+	}
+
+	return traces, nil
+}
+
+// TraceBlockParity returns the structured Parity-format traces for all transactions in a block.
+// Compatible with Polygon Erigon's trace_block method.
+// This method is exposed as debug_traceBlockParity in the RPC API.
+func (api *API) TraceBlockParity(ctx context.Context, number rpc.BlockNumber, config *TraceConfig) ([]*ParityTrace, error) {
+	block, err := api.blockByNumber(ctx, number)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get block: %w", err)
+	}
+
+	return api.traceBlockParityByHash(ctx, block.Hash(), config)
+}
+
+// TraceBlockParityByNumber returns Parity-format traces for a block by number.
+// This method is exposed as debug_traceBlockParityByNumber in the RPC API.
+func (api *API) TraceBlockParityByNumber(ctx context.Context, number rpc.BlockNumber, config *TraceConfig) ([]*ParityTrace, error) {
+	return api.TraceBlockParity(ctx, number, config)
+}
+
+// TraceBlockParityByHash returns Parity-format traces for a block by hash.
+// This method is exposed as debug_traceBlockParityByHash in the RPC API.
+func (api *API) TraceBlockParityByHash(ctx context.Context, hash common.Hash, config *TraceConfig) ([]*ParityTrace, error) {
+	return api.traceBlockParityByHash(ctx, hash, config)
+}
+
+// traceBlockParityByHash is the internal implementation for tracing a block in Parity format.
+//
+// It mirrors the sequential native-tracer path of traceBlock: each transaction
+// (including the post-Madhugiri Bor state-sync transaction, which is part of the
+// block body) is replayed through traceTx with the callTracer, and the resulting
+// call frame is flattened into Parity/OpenEthereum trace entries. State-sync
+// transactions before the Madhugiri hard fork carry no replayable event data and
+// are therefore not emitted, matching upstream behaviour.
+func (api *API) traceBlockParityByHash(ctx context.Context, hash common.Hash, config *TraceConfig) ([]*ParityTrace, error) {
+	block, err := api.blockByHash(ctx, hash)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get block by hash: %w", err)
+	}
+
+	if block.NumberU64() == 0 {
+		return nil, errors.New("genesis block is not traceable")
+	}
+
+	// Get parent block for state
+	parent, err := api.blockByNumberAndHash(ctx, rpc.BlockNumber(block.NumberU64()-1), block.ParentHash())
+	if err != nil {
+		return nil, fmt.Errorf("failed to get parent block: %w", err)
+	}
+
+	reexec := defaultTraceReexec
+	if config != nil && config.Reexec != nil {
+		reexec = *config.Reexec
+	}
+
+	statedb, release, err := api.backend.StateAtBlock(ctx, parent, reexec, nil, true, false)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get state at block %d: %w (archive node required for historical blocks)", parent.NumberU64(), err)
+	}
+	defer release()
+
+	blockCtx := core.NewEVMBlockContext(block.Header(), api.chainContext(ctx), nil)
+	evm := vm.NewEVM(blockCtx, statedb, api.backend.ChainConfig(), vm.Config{})
+	if beaconRoot := block.BeaconRoot(); beaconRoot != nil {
+		core.ProcessBeaconBlockRoot(*beaconRoot, evm)
+	}
+	if api.backend.ChainConfig().IsPrague(block.Number()) {
+		core.ProcessParentBlockHash(block.ParentHash(), evm)
+	}
+
+	// Force the callTracer regardless of the caller-supplied tracer: the Parity
+	// conversion needs a structured call frame. Reexec/Timeout are honoured.
+	callTracer := "callTracer"
+	traceConfig := &TraceConfig{
+		Tracer:       &callTracer,
+		TracerConfig: json.RawMessage(`{}`),
+	}
+	if config != nil {
+		traceConfig.Reexec = config.Reexec
+		traceConfig.Timeout = config.Timeout
+	}
+
+	var (
+		txs               = block.Transactions()
+		signer            = types.MakeSigner(api.backend.ChainConfig(), block.Number(), block.Time())
+		allTraces         = make([]*ParityTrace, 0)
+		blockHash         = block.Hash()
+		blockNumber       = block.NumberU64()
+		cumulativeGasUsed uint64
+	)
+
+	for txIndex, tx := range txs {
+		message, err := core.TransactionToMessage(tx, signer, block.BaseFee())
+		if err != nil {
+			return nil, fmt.Errorf("failed to convert tx to message (tx %d): %w", txIndex, err)
+		}
+
+		txHash := tx.Hash()
+		txctx := &Context{
+			BlockHash:         blockHash,
+			BlockNumber:       block.Number(),
+			TxIndex:           txIndex,
+			TxHash:            txHash,
+			CumulativeGasUsed: cumulativeGasUsed,
+			LogIndex:          len(statedb.Logs()),
+		}
+
+		res, gasUsed, err := api.traceTx(ctx, tx, message, txctx, blockCtx, statedb, traceConfig, nil)
+		if err != nil {
+			return nil, fmt.Errorf("failed to trace tx %d: %w", txIndex, err)
+		}
+		cumulativeGasUsed += gasUsed
+
+		// The callTracer returns its result as json.RawMessage; marshal defensively
+		// in case a future tracer returns a concrete type.
+		raw, ok := res.(json.RawMessage)
+		if !ok {
+			if raw, err = json.Marshal(res); err != nil {
+				return nil, fmt.Errorf("failed to marshal trace result for tx %d: %w", txIndex, err)
+			}
+		}
+
+		var callFrame map[string]interface{}
+		if err := json.Unmarshal(raw, &callFrame); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal trace result for tx %d: %w", txIndex, err)
+		}
+
+		txTraces, err := convertCallFrameToParityTraces(
+			callFrame,
+			[]uint64{},
+			txHash,
+			uint64(txIndex),
+			blockHash,
+			blockNumber,
+			tx,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("failed to convert trace for tx %d: %w", txIndex, err)
+		}
+
+		allTraces = append(allTraces, txTraces...)
+	}
+
+	return allTraces, nil
 }
