@@ -1335,16 +1335,26 @@ func (api *TraceAPI) Block(ctx context.Context, number rpc.BlockNumber) ([]*Pari
 }
 
 func APIs(backend Backend) []rpc.API {
-	api := NewAPI(backend)
 	// Append all the local APIs and return
 	return []rpc.API{
 		{
 			Namespace: "debug",
-			Service:   api,
+			Service:   NewAPI(backend),
 		},
+	}
+}
+
+// TraceAPIs returns the Parity/OpenEthereum-compatible "trace" namespace
+// (trace_block, trace_transaction, trace_call, trace_callMany,
+// trace_replayTransaction, trace_replayBlockTransactions).
+//
+// These methods are expensive and are NOT part of the default RPC surface; they
+// must be enabled explicitly by the operator (see the rpc.enabletrace flag).
+func TraceAPIs(backend Backend) []rpc.API {
+	return []rpc.API{
 		{
 			Namespace: "trace",
-			Service:   &TraceAPI{API: api},
+			Service:   &TraceAPI{API: NewAPI(backend)},
 		},
 	}
 }

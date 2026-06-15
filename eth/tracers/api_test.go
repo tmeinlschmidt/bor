@@ -1687,9 +1687,10 @@ func TestTraceBlockRPCRegistration(t *testing.T) {
 	backend := newTestBackend(t, 1, genesis, func(i int, b *core.BlockGen) {})
 	defer backend.chain.Stop()
 
-	// Create RPC server and register APIs
+	// Create RPC server and register APIs. The trace namespace lives behind
+	// TraceAPIs (opt-in via rpc.enabletrace); register it explicitly here.
 	server := rpc.NewServer("", 1, 5*time.Second)
-	apis := APIs(backend)
+	apis := append(APIs(backend), TraceAPIs(backend)...)
 
 	for _, api := range apis {
 		if err := server.RegisterName(api.Namespace, api.Service); err != nil {
