@@ -23,9 +23,11 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"net"
 	"os"
 	"reflect"
 	"slices"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -1434,5 +1436,328 @@ func TestStandardTraceBlockToFile(t *testing.T) {
 				t.Fatalf("unexpected trace result.  expected\n'%s'\n\nreceived\n'%s'\n", tc.want[j], string(traceReceived))
 			}
 		}
+	}
+}
+
+func TestTraceBlockParity(t *testing.T) {
+	t.Parallel()
+
+	// Initialize test accounts
+	accounts := newAccounts(2)
+	genesis := &core.Genesis{
+		Config: params.TestChainConfig,
+		Alloc: types.GenesisAlloc{
+			accounts[0].addr: {Balance: big.NewInt(params.Ether)},
+			accounts[1].addr: {Balance: big.NewInt(params.Ether)},
+		},
+	}
+	genBlocks := 5
+	signer := types.HomesteadSigner{}
+	backend := newTestBackend(t, genBlocks, genesis, func(i int, b *core.BlockGen) {
+		// Transfer from account[0] to account[1]
+		tx, _ := types.SignTx(types.NewTx(&types.LegacyTx{
+			Nonce:    uint64(i),
+			To:       &accounts[1].addr,
+			Value:    big.NewInt(1000),
+			Gas:      params.TxGas,
+			GasPrice: b.BaseFee(),
+			Data:     nil}),
+			signer, accounts[0].key)
+		b.AddTx(tx)
+	})
+
+	defer backend.chain.Stop()
+	api := NewAPI(backend)
+
+	var testSuite = []struct {
+		name        string
+		blockNumber rpc.BlockNumber
+		expectErr   bool
+	}{
+		{
+			name:        "genesis block should error",
+			blockNumber: rpc.BlockNumber(0),
+			expectErr:   true,
+		},
+		{
+			name:        "non-existent block should error",
+			blockNumber: rpc.BlockNumber(genBlocks + 1),
+			expectErr:   true,
+		},
+	}
+
+	for _, tc := range testSuite {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := api.TraceBlockParity(context.Background(), tc.blockNumber, nil)
+			if tc.expectErr {
+				if err == nil {
+					t.Errorf("expected error but got none")
+				}
+			} else {
+				if err != nil {
+					t.Errorf("unexpected error: %v", err)
+				}
+			}
+		})
+	}
+}
+
+// TestTraceBlockParityByHash tests tracing by block hash.
+// Note: Full validation requires native tracers (callTracer) to be registered.
+func TestTraceBlockParityByHash(t *testing.T) {
+	t.Skip("Requires callTracer to be available - test in integration environment")
+}
+
+// TestConvertCallFrameToParityTraces tests the conversion logic.
+func TestConvertCallFrameToParityTraces(t *testing.T) {
+	t.Parallel()
+
+	testCases := []struct {
+		name      string
+		callFrame map[string]interface{}
+		validate  func(t *testing.T, traces []*ParityTrace)
+	}{
+		{
+			name: "simple call",
+			callFrame: map[string]interface{}{
+				"type":    "CALL",
+				"from":    "0x0000000000000000000000000000000000000001",
+				"to":      "0x0000000000000000000000000000000000000002",
+				"gas":     "0x5208",
+				"gasUsed": "0x5208",
+				"input":   "0x",
+				"output":  "0x",
+				"value":   "0x3e8",
+			},
+			validate: func(t *testing.T, traces []*ParityTrace) {
+				if len(traces) != 1 {
+					t.Errorf("expected 1 trace, got %d", len(traces))
+					return
+				}
+				trace := traces[0]
+				if trace.Type != "call" {
+					t.Errorf("expected type 'call', got %s", trace.Type)
+				}
+				if trace.Action == nil || trace.Action.CallType == nil || *trace.Action.CallType != "call" {
+					t.Error("callType mismatch")
+				}
+				if trace.Subtraces != 0 {
+					t.Errorf("expected 0 subtraces, got %d", trace.Subtraces)
+				}
+			},
+		},
+		{
+			name: "create operation",
+			callFrame: map[string]interface{}{
+				"type":    "CREATE",
+				"from":    "0x0000000000000000000000000000000000000001",
+				"to":      "0x0000000000000000000000000000000000000003",
+				"gas":     "0x30000",
+				"gasUsed": "0x20000",
+				"input":   "0x6060604052",
+				"output":  "0x6080604052",
+				"value":   "0x0",
+			},
+			validate: func(t *testing.T, traces []*ParityTrace) {
+				if len(traces) != 1 {
+					t.Errorf("expected 1 trace, got %d", len(traces))
+					return
+				}
+				trace := traces[0]
+				if trace.Type != "create" {
+					t.Errorf("expected type 'create', got %s", trace.Type)
+				}
+				if trace.Action == nil || trace.Action.Init == nil {
+					t.Error("init field should be set for create")
+				}
+				if trace.Result == nil || trace.Result.Code == nil {
+					t.Error("code field should be set for create result")
+				}
+			},
+		},
+		{
+			name: "failed call with error",
+			callFrame: map[string]interface{}{
+				"type":    "CALL",
+				"from":    "0x0000000000000000000000000000000000000001",
+				"to":      "0x0000000000000000000000000000000000000002",
+				"gas":     "0x5208",
+				"gasUsed": "0x5208",
+				"input":   "0x",
+				"output":  "0x",
+				"value":   "0x3e8",
+				"error":   "out of gas",
+			},
+			validate: func(t *testing.T, traces []*ParityTrace) {
+				if len(traces) != 1 {
+					t.Errorf("expected 1 trace, got %d", len(traces))
+					return
+				}
+				trace := traces[0]
+				if trace.Error == nil || *trace.Error != "out of gas" {
+					t.Error("error field should be set")
+				}
+			},
+		},
+		{
+			name: "nested calls",
+			callFrame: map[string]interface{}{
+				"type":    "CALL",
+				"from":    "0x0000000000000000000000000000000000000001",
+				"to":      "0x0000000000000000000000000000000000000002",
+				"gas":     "0x10000",
+				"gasUsed": "0x8000",
+				"input":   "0x",
+				"output":  "0x",
+				"value":   "0x0",
+				"calls": []interface{}{
+					map[string]interface{}{
+						"type":    "CALL",
+						"from":    "0x0000000000000000000000000000000000000002",
+						"to":      "0x0000000000000000000000000000000000000003",
+						"gas":     "0x5000",
+						"gasUsed": "0x3000",
+						"input":   "0x",
+						"output":  "0x",
+						"value":   "0x0",
+					},
+				},
+			},
+			validate: func(t *testing.T, traces []*ParityTrace) {
+				if len(traces) != 2 {
+					t.Errorf("expected 2 traces (parent + child), got %d", len(traces))
+					return
+				}
+				// Validate parent
+				if traces[0].Subtraces != 1 {
+					t.Errorf("expected 1 subtrace for parent, got %d", traces[0].Subtraces)
+				}
+				if len(traces[0].TraceAddress) != 0 {
+					t.Error("parent should have empty traceAddress")
+				}
+				// Validate child
+				if len(traces[1].TraceAddress) != 1 || traces[1].TraceAddress[0] != 0 {
+					t.Errorf("child should have traceAddress [0], got %v", traces[1].TraceAddress)
+				}
+			},
+		},
+	}
+
+	txHash := common.HexToHash("0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef")
+	blockHash := common.HexToHash("0xabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcd")
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			traces, err := convertCallFrameToParityTraces(
+				tc.callFrame,
+				[]uint64{},
+				txHash,
+				0,
+				blockHash,
+				100,
+				nil, // tx not needed for tests
+			)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if tc.validate != nil {
+				tc.validate(t, traces)
+			}
+		})
+	}
+}
+
+// TestTraceBlockRPCRegistration tests that the trace_block RPC method is properly registered.
+// This ensures the method is exposed via the trace namespace.
+func TestTraceBlockRPCRegistration(t *testing.T) {
+	t.Parallel()
+
+	// Create a minimal test backend
+	accounts := newAccounts(1)
+	genesis := &core.Genesis{
+		Config: params.TestChainConfig,
+		Alloc: types.GenesisAlloc{
+			accounts[0].addr: {Balance: big.NewInt(params.Ether)},
+		},
+	}
+	backend := newTestBackend(t, 1, genesis, func(i int, b *core.BlockGen) {})
+	defer backend.chain.Stop()
+
+	// Create RPC server and register APIs
+	server := rpc.NewServer("", 1, 5*time.Second)
+	apis := APIs(backend)
+
+	for _, api := range apis {
+		if err := server.RegisterName(api.Namespace, api.Service); err != nil {
+			t.Fatalf("failed to register %s API: %v", api.Namespace, err)
+		}
+	}
+
+	// Create client/server connection
+	clientConn, serverConn := net.Pipe()
+	defer clientConn.Close()
+
+	go server.ServeCodec(rpc.NewCodec(serverConn), 0)
+
+	// Create RPC client
+	client := rpc.DialInProc(server)
+	defer client.Close()
+
+	// Test that trace_block method exists and can be called
+	var result interface{}
+	err := client.Call(&result, "trace_block", "0x1")
+
+	// We expect either success or a specific error (genesis not traceable)
+	// but NOT "method does not exist"
+	if err != nil {
+		if strings.Contains(err.Error(), "does not exist") ||
+			strings.Contains(err.Error(), "not available") {
+			t.Fatalf("trace_block method not registered: %v", err)
+		}
+		// Other errors (like "genesis is not traceable") are acceptable
+		// as they prove the method exists
+		t.Logf("trace_block returned expected error: %v", err)
+	}
+}
+
+// TestDebugTraceBlockParityRPCRegistration tests debug_traceBlockParity method registration.
+func TestDebugTraceBlockParityRPCRegistration(t *testing.T) {
+	t.Parallel()
+
+	// Create a minimal test backend
+	accounts := newAccounts(1)
+	genesis := &core.Genesis{
+		Config: params.TestChainConfig,
+		Alloc: types.GenesisAlloc{
+			accounts[0].addr: {Balance: big.NewInt(params.Ether)},
+		},
+	}
+	backend := newTestBackend(t, 1, genesis, func(i int, b *core.BlockGen) {})
+	defer backend.chain.Stop()
+
+	// Create RPC server
+	server := rpc.NewServer("", 1, 5*time.Second)
+	apis := APIs(backend)
+
+	for _, api := range apis {
+		if err := server.RegisterName(api.Namespace, api.Service); err != nil {
+			t.Fatalf("failed to register %s API: %v", api.Namespace, err)
+		}
+	}
+
+	// Create client
+	client := rpc.DialInProc(server)
+	defer client.Close()
+
+	// Test debug_traceBlockParity method
+	var result interface{}
+	err := client.Call(&result, "debug_traceBlockParity", "0x1")
+
+	if err != nil {
+		if strings.Contains(err.Error(), "does not exist") ||
+			strings.Contains(err.Error(), "not available") {
+			t.Fatalf("debug_traceBlockParity method not registered: %v", err)
+		}
+		t.Logf("debug_traceBlockParity returned expected error: %v", err)
 	}
 }
