@@ -21,9 +21,9 @@ import (
 // message against the state at the given block (without persisting it) and
 // returns the requested trace outputs in ReplayResult form.
 //
-// Only the "trace" output is produced for now; "stateDiff" and "vmTrace" are
-// accepted as valid trace types but are not yet generated (they serialize to
-// null). Unknown trace types are rejected.
+// The trace, stateDiff and vmTrace outputs are produced according to the
+// requested traceTypes; unrequested ones serialize to null. Unknown trace types
+// are rejected.
 //
 // Reverts are not Go errors: the callTracer captures the revert reason in the
 // returned frame, so a reverting call still returns a ReplayResult. A genuine
@@ -171,6 +171,15 @@ func (api *API) traceCallExec(ctx context.Context, args ethapi.TransactionArgs, 
 		result.StateDiff = sd
 	}
 
+	// vmTrace is computed on a fresh pre-call copy for the same reason as stateDiff.
+	if set.vmTrace {
+		vt, err := api.parityVMTraceFor(ctx, tx, msg, new(Context), blockCtx, statedb.Copy(), nil)
+		if err != nil {
+			return nil, err
+		}
+		result.VMTrace = vt
+	}
+
 	// trace_call / trace_callMany have no real tx/block identity, so use an empty
 	// Context and strip the per-tx/block metadata from the resulting traces.
 	traces, output, _, err := api.parityTraceTx(ctx, tx, msg, new(Context), blockCtx, statedb, nil, false)
@@ -181,6 +190,5 @@ func (api *API) traceCallExec(ctx context.Context, args ethapi.TransactionArgs, 
 	if set.trace {
 		result.Trace = traces
 	}
-	// vmTrace is not yet produced; leave it nil.
 	return result, nil
 }

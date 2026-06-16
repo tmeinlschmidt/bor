@@ -26,9 +26,6 @@ import (
 // The Output field is always present. The Trace, StateDiff and VMTrace fields
 // are populated only when the corresponding trace type is requested via the
 // traceTypes argument; otherwise they serialize to null.
-//
-// NOTE: stateDiff and vmTrace are not yet produced (tracked in
-// fixes_docs/FEATURE-trace-methods-plan). They always serialize to null for now.
 type ReplayResult struct {
 	Output    *hexutil.Bytes `json:"output"`
 	StateDiff interface{}    `json:"stateDiff"`

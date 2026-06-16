@@ -18,9 +18,8 @@ import (
 // trace_replayBlockTransactions RPC method. It replays every transaction in the
 // requested block and returns one ReplayResult per transaction, in block order.
 //
-// The traceTypes argument selects which trace outputs to populate (e.g.
-// ["trace"]). Only the "trace" output is produced in this phase; "stateDiff"
-// and "vmTrace" are accepted but always serialize to null (see ReplayResult).
+// The traceTypes argument selects which outputs to populate: "trace",
+// "stateDiff" and "vmTrace" (unrequested ones serialize to null).
 //
 // Unlike trace_block, the per-transaction trace entries returned here do NOT
 // carry block/transaction identifier metadata, matching Parity's trace_replay*
@@ -116,6 +115,15 @@ func (api *API) replayBlockTransactions(ctx context.Context, block *types.Block,
 			result.StateDiff = sd
 		}
 
+		// vmTrace is computed on a fresh pre-tx copy for the same reason as stateDiff.
+		if set.vmTrace {
+			vt, err := api.parityVMTraceFor(ctx, tx, message, txctx, blockCtx, statedb.Copy(), nil)
+			if err != nil {
+				return nil, fmt.Errorf("failed to build vmTrace for tx %d: %w", txIndex, err)
+			}
+			result.VMTrace = vt
+		}
+
 		// includeTxMeta is false: trace_replay* entries omit block/tx identifiers.
 		traces, output, gasUsed, err := api.parityTraceTx(ctx, tx, message, txctx, blockCtx, statedb, nil, false)
 		if err != nil {
@@ -127,7 +135,6 @@ func (api *API) replayBlockTransactions(ctx context.Context, block *types.Block,
 		if set.trace {
 			result.Trace = traces
 		}
-		// VMTrace is intentionally left nil: not produced in this phase.
 		results = append(results, result)
 	}
 

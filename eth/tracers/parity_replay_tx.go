@@ -13,10 +13,7 @@ import (
 
 // ReplayTransaction implements the trace_replayTransaction RPC method. It
 // replays a single mined transaction and returns a ReplayResult whose contents
-// are gated by traceTypes (e.g. ["trace"]).
-//
-// NOTE: stateDiff and vmTrace are not yet produced; requesting them yields a
-// null field (tracked in fixes_docs/FEATURE-trace-methods-plan).
+// are gated by traceTypes ("trace", "stateDiff", "vmTrace").
 func (api *TraceAPI) ReplayTransaction(ctx context.Context, txHash common.Hash, traceTypes []string) (*ReplayResult, error) {
 	set, err := parseTraceTypes(traceTypes)
 	if err != nil {
@@ -72,6 +69,15 @@ func (api *TraceAPI) ReplayTransaction(ctx context.Context, txHash common.Hash, 
 		result.StateDiff = sd
 	}
 
+	// vmTrace is computed on a fresh pre-tx copy for the same reason as stateDiff.
+	if set.vmTrace {
+		vt, err := api.parityVMTraceFor(ctx, tx, msg, txctx, vmctx, statedb.Copy(), nil)
+		if err != nil {
+			return nil, err
+		}
+		result.VMTrace = vt
+	}
+
 	// trace_replayTransaction omits per-tx/block identifiers on each entry.
 	traces, output, _, err := api.parityTraceTx(ctx, tx, msg, txctx, vmctx, statedb, nil, false)
 	if err != nil {
@@ -81,6 +87,5 @@ func (api *TraceAPI) ReplayTransaction(ctx context.Context, txHash common.Hash, 
 	if set.trace {
 		result.Trace = traces
 	}
-	// VMTrace remains nil until that trace type is implemented.
 	return result, nil
 }
