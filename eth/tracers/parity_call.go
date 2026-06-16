@@ -159,17 +159,28 @@ func (api *API) traceCallExec(ctx context.Context, args ethapi.TransactionArgs, 
 		blockCtx.BlobBaseFee = new(big.Int)
 	}
 
+	result := &ReplayResult{}
+
+	// stateDiff is computed on a pre-call copy, since the trace run below advances
+	// the shared statedb (which trace_callMany reuses across calls).
+	if set.stateDiff {
+		sd, err := api.parityStateDiffFor(ctx, tx, msg, new(Context), blockCtx, statedb.Copy(), nil)
+		if err != nil {
+			return nil, err
+		}
+		result.StateDiff = sd
+	}
+
 	// trace_call / trace_callMany have no real tx/block identity, so use an empty
 	// Context and strip the per-tx/block metadata from the resulting traces.
 	traces, output, _, err := api.parityTraceTx(ctx, tx, msg, new(Context), blockCtx, statedb, nil, false)
 	if err != nil {
 		return nil, err
 	}
-
-	result := &ReplayResult{Output: output}
+	result.Output = output
 	if set.trace {
 		result.Trace = traces
 	}
-	// stateDiff and vmTrace are not yet produced; leave them nil.
+	// vmTrace is not yet produced; leave it nil.
 	return result, nil
 }

@@ -103,6 +103,18 @@ func (api *API) replayBlockTransactions(ctx context.Context, block *types.Block,
 			LogIndex:          len(statedb.Logs()),
 		}
 
+		result := &ReplayResult{}
+
+		// stateDiff is computed on a pre-tx copy, since the trace run below
+		// advances statedb for the following transactions.
+		if set.stateDiff {
+			sd, err := api.parityStateDiffFor(ctx, tx, message, txctx, blockCtx, statedb.Copy(), nil)
+			if err != nil {
+				return nil, fmt.Errorf("failed to build stateDiff for tx %d: %w", txIndex, err)
+			}
+			result.StateDiff = sd
+		}
+
 		// includeTxMeta is false: trace_replay* entries omit block/tx identifiers.
 		traces, output, gasUsed, err := api.parityTraceTx(ctx, tx, message, txctx, blockCtx, statedb, nil, false)
 		if err != nil {
@@ -110,12 +122,11 @@ func (api *API) replayBlockTransactions(ctx context.Context, block *types.Block,
 		}
 		cumulativeGasUsed += gasUsed
 
-		result := &ReplayResult{Output: output}
+		result.Output = output
 		if set.trace {
 			result.Trace = traces
 		}
-		// StateDiff and VMTrace are intentionally left nil: only the "trace"
-		// output is produced in this phase (see ReplayResult docs).
+		// VMTrace is intentionally left nil: not produced in this phase.
 		results = append(results, result)
 	}
 
