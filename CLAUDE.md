@@ -25,6 +25,8 @@ You may use the following Chainstack Polygon Erigon RPC endpoint to validate tra
 
 **URL**: `${CHAINSTACK_RPC_URL}`
 
+> Set `CHAINSTACK_RPC_URL` in a local `.env` file (git-ignored, never commit it).
+
 **Usage**:
 ```bash
 # Example: Query trace_block for block 0x4cf4912
