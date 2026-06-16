@@ -60,7 +60,8 @@ func (api *TraceAPI) ReplayTransaction(ctx context.Context, txHash common.Hash, 
 		return nil, err
 	}
 
-	result := &ReplayResult{}
+	txHashCopy := txHash
+	result := &ReplayResult{TransactionHash: &txHashCopy}
 
 	// stateDiff is computed on a pre-tx copy (the trace run below advances statedb).
 	if set.stateDiff {

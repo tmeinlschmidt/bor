@@ -118,6 +118,10 @@ func TestReplayTransactionParity_StateDiff(t *testing.T) {
 	if res.Trace != nil {
 		t.Errorf("trace must be nil when only stateDiff requested, got %v", res.Trace)
 	}
+	// trace_replayTransaction carries the replayed tx hash (erigon parity).
+	if res.TransactionHash == nil || *res.TransactionHash != target {
+		t.Errorf("expected transactionHash %x, got %v", target, res.TransactionHash)
+	}
 
 	b, err := json.Marshal(res.StateDiff)
 	if err != nil {

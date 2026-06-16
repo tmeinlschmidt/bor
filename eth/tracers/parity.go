@@ -34,6 +34,9 @@ type ReplayResult struct {
 	StateDiff interface{}    `json:"stateDiff"`
 	Trace     []*ParityTrace `json:"trace"`
 	VMTrace   interface{}    `json:"vmTrace"`
+	// TransactionHash is set by trace_replayTransaction / trace_replayBlockTransactions
+	// (which replay a real, mined tx) and omitted by trace_call / trace_callMany.
+	TransactionHash *common.Hash `json:"transactionHash,omitempty"`
 }
 
 // traceTypeSet captures which Parity trace outputs the caller requested.

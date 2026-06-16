@@ -103,7 +103,8 @@ func (api *API) replayBlockTransactions(ctx context.Context, block *types.Block,
 			LogIndex:          len(statedb.Logs()),
 		}
 
-		result := &ReplayResult{}
+		txHash := tx.Hash()
+		result := &ReplayResult{TransactionHash: &txHash}
 
 		// stateDiff is computed on a pre-tx copy, since the trace run below
 		// advances statedb for the following transactions.
