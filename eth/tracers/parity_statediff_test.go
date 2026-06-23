@@ -76,9 +76,11 @@ func TestBuildParityStateDiff(t *testing.T) {
 	mj := accountJSON(t, diff, modified)
 	for _, want := range []string{
 		`"balance":{"*":`, `"nonce":"="`,
+		// On an existing account all storage changes are "*" (new slot reads as
+		// from 0x0; cleared slot reads as to 0x0).
 		strings.ToLower(slotChanged.Hex()) + `":{"*":`,
-		strings.ToLower(slotAdded.Hex()) + `":{"+":`,
-		strings.ToLower(slotRemoved.Hex()) + `":{"-":`,
+		strings.ToLower(slotAdded.Hex()) + `":{"*":`,
+		strings.ToLower(slotRemoved.Hex()) + `":{"*":`,
 	} {
 		if !strings.Contains(mj, want) {
 			t.Errorf("modified diff missing %q in %s", want, mj)

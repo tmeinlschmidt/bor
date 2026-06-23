@@ -241,11 +241,12 @@ type txTraceTask struct {
 // ParityTrace represents a single trace entry in the Parity/OpenEthereum format.
 // Used by trace_block and other trace_* methods for compatibility with Polygon Erigon.
 type ParityTrace struct {
-	Action              *ParityTraceAction `json:"action,omitempty"`
-	BlockHash           *common.Hash       `json:"blockHash,omitempty"`
-	BlockNumber         *uint64            `json:"blockNumber,omitempty"`
-	Error               *string            `json:"error,omitempty"`
-	Result              *ParityTraceResult `json:"result,omitempty"`
+	Action      *ParityTraceAction `json:"action,omitempty"`
+	BlockHash   *common.Hash       `json:"blockHash,omitempty"`
+	BlockNumber *uint64            `json:"blockNumber,omitempty"`
+	Error       *string            `json:"error,omitempty"`
+	// Result is always emitted (null for suicides and failed calls), matching erigon.
+	Result              *ParityTraceResult `json:"result"`
 	Subtraces           uint64             `json:"subtraces"`
 	TraceAddress        []uint64           `json:"traceAddress"`
 	TransactionHash     *common.Hash       `json:"transactionHash,omitempty"`

@@ -158,16 +158,20 @@ func buildParityStateDiff(pre, post map[common.Address]*prestateAccount) parityS
 			} else {
 				acc.Code = sdSame()
 			}
+			// For an existing account, every storage change is encoded as "*";
+			// a freshly written slot reads as 0 -> val and a cleared slot as
+			// val -> 0 (Parity only uses "+"/"-" on created/deleted accounts).
+			var zero common.Hash
 			for slot, newVal := range postAcc.Storage {
 				if oldVal, ok := preAcc.Storage[slot]; ok {
 					acc.Storage[slot] = sdChanged(oldVal, newVal)
 				} else {
-					acc.Storage[slot] = sdAdded(newVal)
+					acc.Storage[slot] = sdChanged(zero, newVal)
 				}
 			}
 			for slot, oldVal := range preAcc.Storage {
 				if _, ok := postAcc.Storage[slot]; !ok {
-					acc.Storage[slot] = sdRemoved(oldVal)
+					acc.Storage[slot] = sdChanged(oldVal, zero)
 				}
 			}
 		}
