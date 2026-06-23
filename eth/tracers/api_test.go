@@ -1621,13 +1621,12 @@ func TestConvertCallFrameToParityTraces(t *testing.T) {
 					return
 				}
 				trace := traces[0]
-				// geth's "out of gas" is mapped to the Parity name "Out of gas".
-				if trace.Error == nil || *trace.Error != "Out of gas" {
-					t.Errorf("error field should be Parity-mapped, got %v", trace.Error)
+				// Non-revert errors keep the raw EVM string and omit the result.
+				if trace.Error == nil || *trace.Error != "out of gas" {
+					t.Errorf("error should be raw 'out of gas', got %v", trace.Error)
 				}
-				// Parity still returns a result (gasUsed/output) on failure.
-				if trace.Result == nil || trace.Result.GasUsed == nil {
-					t.Error("result.gasUsed should be present even on error")
+				if trace.Result != nil {
+					t.Errorf("result must be nil for non-revert errors, got %+v", trace.Result)
 				}
 			},
 		},

@@ -26,7 +26,6 @@ import (
 	"os"
 	"runtime"
 	"sort"
-	"strings"
 	"sync"
 	"time"
 
@@ -1577,43 +1576,53 @@ func convertCallFrameToParityTraces(
 
 	trace.Action = action
 
-	// Build Result. Parity always returns a result object with gasUsed and output
-	// (output defaulting to "0x"), even for reverted calls; the error field, when
-	// present, is set in addition to the result.
-	result := &ParityTraceResult{}
-	if gasUsed != "" {
-		if gu, err := hexutil.DecodeUint64(gasUsed); err == nil {
-			// Root gasUsed must report gross EVM gas: the callTracer gives the net
-			// value (post-refund, intrinsic-inclusive), so add the refund back and
-			// subtract intrinsic. refundGas/intrinsicGas are 0 for subcalls.
-			gu += refundGas
-			if gu >= intrinsicGas {
-				gu -= intrinsicGas
+	// Result / error follow erigon semantics:
+	//   - success: result present, no error
+	//   - revert:  result present (gasUsed + revert output) AND error "Reverted"
+	//   - other error (out of gas, ...): result omitted, error = raw EVM string
+	isRevert := errorStr == "execution reverted"
+	if errorStr == "" || isRevert {
+		result := &ParityTraceResult{}
+		if gasUsed != "" {
+			if gu, err := hexutil.DecodeUint64(gasUsed); err == nil {
+				// Root gasUsed reports gross EVM gas: add the refund back (successful
+				// calls only — reverts get no refund) and subtract intrinsic.
+				// refundGas/intrinsicGas are 0 for subcalls.
+				if errorStr == "" {
+					gu += refundGas
+				}
+				if gu >= intrinsicGas {
+					gu -= intrinsicGas
+				}
+				guHex := hexutil.Uint64(gu)
+				result.GasUsed = &guHex
 			}
-			guHex := hexutil.Uint64(gu)
-			result.GasUsed = &guHex
 		}
+		if traceType == "create" && errorStr == "" {
+			if output != "" {
+				outputBytes := hexutil.MustDecode(output)
+				result.Code = (*hexutil.Bytes)(&outputBytes)
+			}
+			if toAddr, ok := frame["to"].(string); ok && toAddr != "" {
+				addr := common.HexToAddress(toAddr)
+				result.Address = &addr
+			}
+		} else if traceType != "suicide" {
+			outputBytes := []byte{}
+			if output != "" {
+				outputBytes = hexutil.MustDecode(output)
+			}
+			ob := hexutil.Bytes(outputBytes)
+			result.Output = &ob
+		}
+		trace.Result = result
 	}
-	if traceType == "create" && errorStr == "" {
-		if output != "" {
-			outputBytes := hexutil.MustDecode(output)
-			result.Code = (*hexutil.Bytes)(&outputBytes)
-		}
-		if toAddr, ok := frame["to"].(string); ok && toAddr != "" {
-			addr := common.HexToAddress(toAddr)
-			result.Address = &addr
-		}
-	} else if traceType != "suicide" {
-		outputBytes := []byte{}
-		if output != "" {
-			outputBytes = hexutil.MustDecode(output)
-		}
-		ob := hexutil.Bytes(outputBytes)
-		result.Output = &ob
-	}
-	trace.Result = result
-	if errorStr != "" {
-		e := parityErrorString(errorStr)
+	if isRevert {
+		e := "Reverted"
+		trace.Error = &e
+	} else if errorStr != "" {
+		// Non-revert errors are reported with the raw EVM string (e.g. "out of gas").
+		e := errorStr
 		trace.Error = &e
 	}
 
@@ -1662,30 +1671,6 @@ func isPrecompileFrame(frame map[string]interface{}) bool {
 	}
 	last := addr[common.AddressLength-1]
 	return last >= 0x01 && last <= 0x0a
-}
-
-// parityErrorString maps go-ethereum EVM error strings to the Parity/OpenEthereum
-// error names used by erigon's trace output.
-func parityErrorString(gethErr string) string {
-	switch gethErr {
-	case "execution reverted":
-		return "Reverted"
-	case "out of gas", "gas uint64 overflow", "contract creation code storage out of gas", "max code size exceeded":
-		return "Out of gas"
-	case "invalid jump destination":
-		return "Bad jump destination"
-	case "write protection":
-		return "Mutable Call In Static Context"
-	case "stack underflow":
-		return "Stack underflow"
-	}
-	switch {
-	case strings.HasPrefix(gethErr, "invalid opcode"):
-		return "Bad instruction"
-	case strings.HasPrefix(gethErr, "stack limit reached"):
-		return "Out of stack"
-	}
-	return gethErr
 }
 
 // TraceBlockParity returns the structured Parity-format traces for all transactions in a block.
