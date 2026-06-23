@@ -1642,10 +1642,14 @@ func convertCallFrameToParityTraces(
 			}
 		}
 		if traceType == "create" && errorStr == "" {
+			// Always emit code (default "0x"): a create deploying empty code still
+			// reports result.code, matching erigon.
+			outputBytes := []byte{}
 			if output != "" {
-				outputBytes := hexutil.MustDecode(output)
-				result.Code = (*hexutil.Bytes)(&outputBytes)
+				outputBytes = hexutil.MustDecode(output)
 			}
+			ob := hexutil.Bytes(outputBytes)
+			result.Code = &ob
 			if toAddr, ok := frame["to"].(string); ok && toAddr != "" {
 				addr := common.HexToAddress(toAddr)
 				result.Address = &addr
