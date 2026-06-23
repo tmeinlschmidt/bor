@@ -73,10 +73,9 @@ type vmTraceSto struct {
 // (push/mem) can only be observed at the NEXT OnOpcode (look-ahead).
 type vmTracePending struct {
 	op       *vmTraceOp
+	opcode   vm.OpCode // the executed opcode (for push count / mem region)
 	gasStart uint64
-	preStack []byte // copy of pre-op stack words (bottom-first, 32 bytes each)
-	preMem   []byte // copy of pre-op memory
-	preLen   int    // pre-op stack length (number of words)
+	preStack []uint256.Int // copy of pre-op stack (bottom-first) for mem operands
 }
 
 // vmTraceState is the per-frame bookkeeping kept on a stack mirroring the EVM
@@ -211,14 +210,13 @@ func (t *parityVMTracer) OnOpcode(pc uint64, opcode byte, gas, cost uint64, scop
 		}
 	}
 
-	// Pre-op snapshots used to diff push/mem at the next step.
-	stackData := scope.StackData()
+	// Pre-op snapshot: opcode (push count / mem region) + a copy of the stack
+	// (memory-write operands). push/mem are finalized at the next OnOpcode.
 	pre := &vmTracePending{
 		op:       entry,
+		opcode:   op,
 		gasStart: gas,
-		preStack: vmTraceStackBytes(stackData),
-		preMem:   append([]byte{}, scope.MemoryData()...),
-		preLen:   len(stackData),
+		preStack: append([]uint256.Int{}, scope.StackData()...),
 	}
 	entry.Ex = &vmTraceEx{Push: []string{}, Used: gas - cost}
 	if store != nil {
@@ -227,12 +225,28 @@ func (t *parityVMTracer) OnOpcode(pc uint64, opcode byte, gas, cost uint64, scop
 	cur.pending = pre
 }
 
-// finalizeWithScope completes an op's ex.push and ex.mem by diffing the pre-op
-// snapshot against the current scope.
+// finalizeWithScope completes an op's ex.push and ex.mem using the op's known
+// stack-push count and memory-write region, read against the post-op scope.
 func (t *parityVMTracer) finalizeWithScope(p *vmTracePending, scope tracing.OpContext) {
-	curStack := scope.StackData()
-	p.op.Ex.Push = vmTracePushDiff(p.preStack, p.preLen, curStack)
-	p.op.Ex.Mem = vmTraceMemDiff(p.preMem, scope.MemoryData())
+	// push = the op's pushed value(s), i.e. the top N items of the post-op stack.
+	if n := vmTraceOpPushCount(p.opcode); n > 0 {
+		curStack := scope.StackData()
+		if n > len(curStack) {
+			n = len(curStack)
+		}
+		push := make([]string, 0, n)
+		for i := len(curStack) - n; i < len(curStack); i++ {
+			push = append(push, hexutil.EncodeBig(curStack[i].ToBig()))
+		}
+		p.op.Ex.Push = push
+	}
+	// mem = the exact region the op wrote, read from post-op memory.
+	if off, size, writes := vmTraceMemRegion(p.opcode, p.preStack); writes {
+		mem := scope.MemoryData()
+		if off+size <= uint64(len(mem)) {
+			p.op.Ex.Mem = &vmTraceMem{Off: int(off), Data: append(hexutil.Bytes{}, mem[off:off+size]...)}
+		}
+	}
 }
 
 // finalizeNoScope completes the last op of a frame at OnExit, where no scope is
@@ -244,88 +258,92 @@ func (t *parityVMTracer) finalizeNoScope(p *vmTracePending) {
 	}
 }
 
-// vmTraceStackBytes flattens the uint256 stack (bottom-first) into a byte slice
-// of 32-byte words for cheap comparison.
-func vmTraceStackBytes(data []uint256.Int) []byte {
-	out := make([]byte, 0, len(data)*32)
-	for i := range data {
-		b := data[i].Bytes32()
-		out = append(out, b[:]...)
+// vmTraceOpPushCount returns how many words the opcode pushes onto the stack
+// (the count Parity's vmTrace reports in "push": the items on top of the post-op
+// stack). Derived from the core/vm jump-table push counts.
+func vmTraceOpPushCount(op vm.OpCode) int {
+	switch op {
+	case vm.ADD, vm.MUL, vm.SUB, vm.DIV, vm.SDIV, vm.MOD, vm.SMOD,
+		vm.ADDMOD, vm.MULMOD, vm.EXP, vm.SIGNEXTEND:
+		return 1
+	case vm.LT, vm.GT, vm.SLT, vm.SGT, vm.EQ, vm.ISZERO,
+		vm.AND, vm.OR, vm.XOR, vm.NOT, vm.BYTE,
+		vm.SHL, vm.SHR, vm.SAR, vm.CLZ:
+		return 1
+	case vm.KECCAK256:
+		return 1
+	case vm.ADDRESS, vm.BALANCE, vm.ORIGIN, vm.CALLER, vm.CALLVALUE,
+		vm.CALLDATALOAD, vm.CALLDATASIZE, vm.CODESIZE, vm.GASPRICE,
+		vm.EXTCODESIZE, vm.RETURNDATASIZE, vm.EXTCODEHASH:
+		return 1
+	case vm.BLOCKHASH, vm.COINBASE, vm.TIMESTAMP, vm.NUMBER,
+		vm.DIFFICULTY, vm.GASLIMIT,
+		vm.CHAINID, vm.SELFBALANCE, vm.BASEFEE, vm.BLOBHASH, vm.BLOBBASEFEE:
+		return 1
+	case vm.MLOAD, vm.SLOAD, vm.TLOAD, vm.PC, vm.MSIZE, vm.GAS:
+		return 1
+	case vm.CREATE, vm.CREATE2, vm.CALL, vm.CALLCODE,
+		vm.DELEGATECALL, vm.STATICCALL:
+		return 1
+	case vm.STOP, vm.POP, vm.MSTORE, vm.MSTORE8, vm.SSTORE, vm.TSTORE,
+		vm.JUMP, vm.JUMPI, vm.JUMPDEST, vm.MCOPY,
+		vm.RETURN, vm.REVERT, vm.INVALID, vm.SELFDESTRUCT:
+		return 0
+	case vm.CALLDATACOPY, vm.CODECOPY, vm.EXTCODECOPY, vm.RETURNDATACOPY:
+		return 0
 	}
-	return out
+	switch {
+	case op >= vm.PUSH0 && op <= vm.PUSH32:
+		return 1
+	case op >= vm.DUP1 && op <= vm.DUP16:
+		return 1
+	case op >= vm.SWAP1 && op <= vm.SWAP16:
+		return 0
+	case op >= vm.LOG0 && op <= vm.LOG4:
+		return 0
+	}
+	return 0
 }
 
-// vmTracePushDiff returns the values present in the current stack above the
-// longest common prefix shared with the pre-op stack (compared from the bottom).
-// This captures PUSH/DUP/arithmetic results. SWAP may over-report (documented v1
-// limitation) since it rewrites items below the top.
-func vmTracePushDiff(preStack []byte, preLen int, cur []uint256.Int) []string {
-	// Common prefix length in words, counted from the bottom of the stack.
-	commonWords := 0
-	maxWords := preLen
-	if len(cur) < maxWords {
-		maxWords = len(cur)
-	}
-	for commonWords < maxWords {
-		off := commonWords * 32
-		b := cur[commonWords].Bytes32()
-		if !bytesEqual32(preStack[off:off+32], b[:]) {
-			break
+// vmTraceMemRegion returns the memory region [off, off+size) written by the
+// opcode, derived from the pre-op stack (bottom-first, as scope.StackData()).
+// writes=false if the opcode doesn't write memory or the length is zero. Stack
+// arg order verified against core/vm/instructions.go.
+func vmTraceMemRegion(op vm.OpCode, stack []uint256.Int) (off uint64, size uint64, writes bool) {
+	top := func(n int) (uint64, bool) {
+		idx := len(stack) - n
+		if idx < 0 {
+			return 0, false
 		}
-		commonWords++
-	}
-	push := make([]string, 0, len(cur)-commonWords)
-	for i := commonWords; i < len(cur); i++ {
-		v := cur[i]
-		push = append(push, hexutil.EncodeBig(v.ToBig()))
-	}
-	return push
-}
-
-// bytesEqual32 compares two 32-byte slices.
-func bytesEqual32(a, b []byte) bool {
-	for i := 0; i < 32; i++ {
-		if a[i] != b[i] {
-			return false
+		val := stack[idx]
+		if !val.IsUint64() {
+			return 0, false
 		}
+		return val.Uint64(), true
 	}
-	return true
-}
-
-// vmTraceMemDiff reports the contiguous changed byte range between pre-op and
-// post-op memory, or nil if memory is unchanged.
-func vmTraceMemDiff(pre, cur []byte) *vmTraceMem {
-	if len(cur) == 0 {
-		return nil
-	}
-	first := -1
-	last := -1
-	for i := 0; i < len(cur); i++ {
-		var pb byte
-		if i < len(pre) {
-			pb = pre[i]
+	switch op {
+	case vm.MSTORE:
+		if o, ok := top(1); ok {
+			return o, 32, true
 		}
-		if cur[i] != pb {
-			if first == -1 {
-				first = i
-			}
-			last = i
+	case vm.MSTORE8:
+		if o, ok := top(1); ok {
+			return o, 1, true
+		}
+	case vm.CALLDATACOPY, vm.CODECOPY, vm.RETURNDATACOPY, vm.MCOPY:
+		o, ok1 := top(1)
+		l, ok3 := top(3)
+		if ok1 && ok3 && l != 0 {
+			return o, l, true
+		}
+	case vm.EXTCODECOPY:
+		o, ok2 := top(2)
+		l, ok4 := top(4)
+		if ok2 && ok4 && l != 0 {
+			return o, l, true
 		}
 	}
-	if first == -1 {
-		return nil
-	}
-	// EVM memory writes operate on full 32-byte words (MSTORE etc.), and erigon
-	// reports the whole written word even when some bytes coincide with prior
-	// (zero) memory. Round the changed range out to word boundaries so a write
-	// like MSTORE(0x80) at offset 64 reports off=64 with the full 32-byte word
-	// rather than just the single non-zero byte.
-	start := (first / 32) * 32
-	end := ((last / 32) + 1) * 32
-	if end > len(cur) {
-		end = len(cur)
-	}
-	return &vmTraceMem{Off: start, Data: append(hexutil.Bytes{}, cur[start:end]...)}
+	return 0, 0, false
 }
 
 // GetResult marshals the root frame as the vmTrace object. For a plain value
