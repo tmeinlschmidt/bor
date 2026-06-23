@@ -1433,6 +1433,7 @@ func convertCallFrameToParityTraces(
 	blockHash common.Hash,
 	blockNumber uint64,
 	intrinsicGas uint64,
+	refundGas uint64,
 ) ([]*ParityTrace, error) {
 	traces := make([]*ParityTrace, 0)
 
@@ -1572,6 +1573,10 @@ func convertCallFrameToParityTraces(
 	result := &ParityTraceResult{}
 	if gasUsed != "" {
 		if gu, err := hexutil.DecodeUint64(gasUsed); err == nil {
+			// Root gasUsed must report gross EVM gas: the callTracer gives the net
+			// value (post-refund, intrinsic-inclusive), so add the refund back and
+			// subtract intrinsic. refundGas/intrinsicGas are 0 for subcalls.
+			gu += refundGas
 			if gu > intrinsicGas {
 				gu -= intrinsicGas
 			}
@@ -1616,6 +1621,7 @@ func convertCallFrameToParityTraces(
 			blockHash,
 			blockNumber,
 			0, // intrinsicGas applies only to the top-level call
+			0, // refundGas applies only to the top-level call
 		)
 		if err != nil {
 			return nil, err

@@ -93,9 +93,11 @@ func (api *API) parityTraceTx(
 	baseConfig *TraceConfig,
 	includeTxMeta bool,
 ) ([]*ParityTrace, *hexutil.Bytes, uint64, error) {
-	callTracer := "callTracer"
+	// parityCallTracer wraps the native callTracer and also reports the tx gas
+	// refund, which the root trace needs to report gross gasUsed (erigon semantics).
+	tracerName := parityCallTracerName
 	traceConfig := &TraceConfig{
-		Tracer:       &callTracer,
+		Tracer:       &tracerName,
 		TracerConfig: json.RawMessage(`{}`),
 	}
 	if baseConfig != nil {
@@ -108,7 +110,7 @@ func (api *API) parityTraceTx(
 		return nil, nil, 0, err
 	}
 
-	// The callTracer returns json.RawMessage; marshal defensively otherwise.
+	// The tracer returns json.RawMessage; marshal defensively otherwise.
 	raw, ok := res.(json.RawMessage)
 	if !ok {
 		if raw, err = json.Marshal(res); err != nil {
@@ -116,9 +118,14 @@ func (api *API) parityTraceTx(
 		}
 	}
 
-	var callFrame map[string]interface{}
-	if err := json.Unmarshal(raw, &callFrame); err != nil {
+	var wrapped parityCallResult
+	if err := json.Unmarshal(raw, &wrapped); err != nil {
 		return nil, nil, 0, fmt.Errorf("unmarshal trace result: %w", err)
+	}
+
+	var callFrame map[string]interface{}
+	if err := json.Unmarshal(wrapped.Frame, &callFrame); err != nil {
+		return nil, nil, 0, fmt.Errorf("unmarshal call frame: %w", err)
 	}
 
 	var (
@@ -147,7 +154,7 @@ func (api *API) parityTraceTx(
 		}
 	}
 
-	traces, err := convertCallFrameToParityTraces(callFrame, []uint64{}, txHash, txIndex, blockHash, blockNumber, intrinsicGas)
+	traces, err := convertCallFrameToParityTraces(callFrame, []uint64{}, txHash, txIndex, blockHash, blockNumber, intrinsicGas, wrapped.Refund)
 	if err != nil {
 		return nil, nil, 0, fmt.Errorf("convert trace: %w", err)
 	}
