@@ -1454,7 +1454,7 @@ func convertCallFrameToParityTraces(
 	blockHash common.Hash,
 	blockNumber uint64,
 	intrinsicGas uint64,
-	refundGas uint64,
+	rootGasUsed uint64,
 ) ([]*ParityTrace, error) {
 	traces := make([]*ParityTrace, 0)
 
@@ -1539,6 +1539,29 @@ func convertCallFrameToParityTraces(
 		BlockNumber:         &blockNumber,
 	}
 
+	// SELFDESTRUCT uses a distinct action shape: {address, refundAddress, balance},
+	// no callType/gas/input and no result. It has no subcalls.
+	if traceType == "suicide" {
+		suicide := &ParityTraceAction{}
+		if fromAddr != "" {
+			a := common.HexToAddress(fromAddr)
+			suicide.Address = &a
+		}
+		if toAddr, ok := frame["to"].(string); ok && toAddr != "" {
+			b := common.HexToAddress(toAddr)
+			suicide.RefundAddress = &b
+		}
+		bal := new(big.Int)
+		if value != "" {
+			if pv, ok := new(big.Int).SetString(value, 0); ok {
+				bal = pv
+			}
+		}
+		suicide.Balance = (*hexutil.Big)(bal)
+		trace.Action = suicide
+		return append(traces, trace), nil
+	}
+
 	// Build Action
 	action := &ParityTraceAction{}
 	if fromAddr != "" {
@@ -1604,17 +1627,15 @@ func convertCallFrameToParityTraces(
 	isRevert := errorStr == "execution reverted"
 	if errorStr == "" || isRevert {
 		result := &ParityTraceResult{}
-		if gasUsed != "" {
+		if len(traceAddress) == 0 {
+			// Root: gross EVM execution gas, precomputed by the caller as
+			// gasLimit - postExecGasRemaining - intrinsicGas (excludes intrinsic,
+			// the EIP-7623 data floor, and gas refunds — matching erigon).
+			guHex := hexutil.Uint64(rootGasUsed)
+			result.GasUsed = &guHex
+		} else if gasUsed != "" {
+			// Subcalls: the callTracer frame gasUsed is already the gross frame gas.
 			if gu, err := hexutil.DecodeUint64(gasUsed); err == nil {
-				// Root gasUsed reports gross EVM gas: add the refund back (successful
-				// calls only — reverts get no refund) and subtract intrinsic.
-				// refundGas/intrinsicGas are 0 for subcalls.
-				if errorStr == "" {
-					gu += refundGas
-				}
-				if gu >= intrinsicGas {
-					gu -= intrinsicGas
-				}
 				guHex := hexutil.Uint64(gu)
 				result.GasUsed = &guHex
 			}
@@ -1661,7 +1682,7 @@ func convertCallFrameToParityTraces(
 			blockHash,
 			blockNumber,
 			0, // intrinsicGas applies only to the top-level call
-			0, // refundGas applies only to the top-level call
+			0, // rootGasUsed applies only to the top-level call
 		)
 		if err != nil {
 			return nil, err

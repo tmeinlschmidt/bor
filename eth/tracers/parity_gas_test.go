@@ -14,9 +14,9 @@ import (
 
 // TestConvertRootGasUsedGrossExec locks the root gas accounting against the real
 // values observed from an erigon reference node (staticcall tx 0xbe61...):
-// the callTracer's net root gasUsed (0x5a6d4) plus the captured refund (25780)
-// minus the intrinsic gas (21856) must equal erigon's gross gasUsed (0x5b628),
-// and action.gas must be the gas limit (0xc5a70) minus the intrinsic (= 0xc0510).
+// the converter emits the caller-supplied gross gasUsed (erigon's 0x5b628) for
+// the root, and action.gas is the gas limit (0xc5a70) minus the intrinsic
+// (21856 = 0xc0510).
 func TestConvertRootGasUsedGrossExec(t *testing.T) {
 	t.Parallel()
 
@@ -26,7 +26,7 @@ func TestConvertRootGasUsedGrossExec(t *testing.T) {
 		"gas": "0xc5a70", "gasUsed": "0x5a6d4", "input": "0x", "output": "0x", "value": "0x0",
 	}
 
-	traces, err := convertCallFrameToParityTraces(frame, []uint64{}, common.Hash{}, 0, common.Hash{}, 0, 21856, 25780)
+	traces, err := convertCallFrameToParityTraces(frame, []uint64{}, common.Hash{}, 0, common.Hash{}, 0, 21856, 0x5b628)
 	if err != nil {
 		t.Fatalf("convert: %v", err)
 	}

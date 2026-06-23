@@ -1520,7 +1520,7 @@ func TestConvertCallFrameToParityTraces(t *testing.T) {
 		name         string
 		callFrame    map[string]interface{}
 		intrinsicGas uint64
-		refundGas    uint64
+		rootGasUsed  uint64
 		validate     func(t *testing.T, traces []*ParityTrace)
 	}{
 		{
@@ -1717,6 +1717,7 @@ func TestConvertCallFrameToParityTraces(t *testing.T) {
 				"gasUsed": "0x2e", "input": "0x", "output": "0x", "value": "0x0",
 				"error": "execution reverted",
 			},
+			rootGasUsed: 0x2e, // gross exec gas (root) supplied by caller
 			validate: func(t *testing.T, traces []*ParityTrace) {
 				tr := traces[0]
 				if tr.Error == nil || *tr.Error != "Reverted" {
@@ -1747,6 +1748,36 @@ func TestConvertCallFrameToParityTraces(t *testing.T) {
 				}
 			},
 		},
+		{
+			name: "suicide action shape",
+			callFrame: map[string]interface{}{
+				"type": "SELFDESTRUCT", "from": "0xaa00000000000000000000000000000000000001",
+				"to":    "0xbb00000000000000000000000000000000000002",
+				"value": "0x7e9", "gas": "0x0", "gasUsed": "0x0",
+			},
+			validate: func(t *testing.T, traces []*ParityTrace) {
+				tr := traces[0]
+				if tr.Type != "suicide" {
+					t.Errorf("expected type 'suicide', got %q", tr.Type)
+				}
+				a := tr.Action
+				if a.Address == nil || *a.Address != common.HexToAddress("0xaa00000000000000000000000000000000000001") {
+					t.Errorf("suicide address mismatch: %v", a.Address)
+				}
+				if a.RefundAddress == nil || *a.RefundAddress != common.HexToAddress("0xbb00000000000000000000000000000000000002") {
+					t.Errorf("suicide refundAddress mismatch: %v", a.RefundAddress)
+				}
+				if a.Balance == nil || a.Balance.ToInt().Int64() != 0x7e9 {
+					t.Errorf("suicide balance mismatch: %v", a.Balance)
+				}
+				if a.From != nil || a.To != nil || a.Gas != nil || a.CallType != nil || a.Input != nil {
+					t.Errorf("suicide action must not carry call fields: %+v", a)
+				}
+				if tr.Result != nil {
+					t.Errorf("suicide must have no result, got %+v", tr.Result)
+				}
+			},
+		},
 	}
 
 	txHash := common.HexToHash("0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef")
@@ -1762,7 +1793,7 @@ func TestConvertCallFrameToParityTraces(t *testing.T) {
 				blockHash,
 				100,
 				tc.intrinsicGas,
-				tc.refundGas,
+				tc.rootGasUsed,
 			)
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)

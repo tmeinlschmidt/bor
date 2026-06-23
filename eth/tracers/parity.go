@@ -154,7 +154,20 @@ func (api *API) parityTraceTx(
 		}
 	}
 
-	traces, err := convertCallFrameToParityTraces(callFrame, []uint64{}, txHash, txIndex, blockHash, blockNumber, intrinsicGas, wrapped.Refund)
+	// Root gasUsed = gross EVM execution gas = gasLimit - postExecGasRemaining -
+	// intrinsic. This excludes the intrinsic cost, the EIP-7623 data floor and gas
+	// refunds, matching erigon. Falls back to the callTracer's (net) gasUsed if the
+	// post-execution gas wasn't observed.
+	var rootGasUsed uint64
+	if message != nil && wrapped.GasLeftSet && message.GasLimit >= wrapped.GasLeft+intrinsicGas {
+		rootGasUsed = message.GasLimit - wrapped.GasLeft - intrinsicGas
+	} else if s, ok := callFrame["gasUsed"].(string); ok {
+		if gu, derr := hexutil.DecodeUint64(s); derr == nil && gu >= intrinsicGas {
+			rootGasUsed = gu - intrinsicGas
+		}
+	}
+
+	traces, err := convertCallFrameToParityTraces(callFrame, []uint64{}, txHash, txIndex, blockHash, blockNumber, intrinsicGas, rootGasUsed)
 	if err != nil {
 		return nil, nil, 0, fmt.Errorf("convert trace: %w", err)
 	}
