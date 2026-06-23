@@ -183,9 +183,11 @@ func (t *parityVMTracer) OnOpcode(pc uint64, opcode byte, gas, cost uint64, scop
 	}
 	cur := t.stack[len(t.stack)-1]
 
-	// Finalize the previous op now that the scope reflects its result.
+	// Finalize the previous op now that the scope reflects its result. This op's
+	// gas == the gas remaining after the previous op (including gas returned by a
+	// sub-call), which is exactly Parity's ex.used for that previous op.
 	if cur.pending != nil {
-		t.finalizeWithScope(cur.pending, scope)
+		t.finalizeWithScope(cur.pending, scope, gas)
 		cur.pending = nil
 	}
 
@@ -225,9 +227,12 @@ func (t *parityVMTracer) OnOpcode(pc uint64, opcode byte, gas, cost uint64, scop
 	cur.pending = pre
 }
 
-// finalizeWithScope completes an op's ex.push and ex.mem using the op's known
-// stack-push count and memory-write region, read against the post-op scope.
-func (t *parityVMTracer) finalizeWithScope(p *vmTracePending, scope tracing.OpContext) {
+// finalizeWithScope completes an op's ex (push, mem, used) using the op's known
+// stack-push count and memory-write region read against the post-op scope, and
+// nextGas = the gas remaining after the op (this is Parity's ex.used, correct
+// for calls where the callee returns leftover gas).
+func (t *parityVMTracer) finalizeWithScope(p *vmTracePending, scope tracing.OpContext, nextGas uint64) {
+	p.op.Ex.Used = nextGas
 	// push = the op's pushed value(s), i.e. the top N items of the post-op stack.
 	if n := vmTraceOpPushCount(p.opcode); n > 0 {
 		curStack := scope.StackData()
@@ -295,10 +300,13 @@ func vmTraceOpPushCount(op vm.OpCode) int {
 	switch {
 	case op >= vm.PUSH0 && op <= vm.PUSH32:
 		return 1
+	// Parity/OpenEthereum reports the top `ret` items, and for DUPn/SWAPn ret = n+1
+	// (DUP1 -> 2 copies of the value, SWAP1 -> the 2 swapped values, etc.), not the
+	// net stack growth.
 	case op >= vm.DUP1 && op <= vm.DUP16:
-		return 1
+		return int(op-vm.DUP1) + 2
 	case op >= vm.SWAP1 && op <= vm.SWAP16:
-		return 0
+		return int(op-vm.SWAP1) + 2
 	case op >= vm.LOG0 && op <= vm.LOG4:
 		return 0
 	}
