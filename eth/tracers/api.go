@@ -111,25 +111,16 @@ func (api *API) chainContext(ctx context.Context) core.ChainContext {
 	return ethapi.NewChainContext(ctx, api.backend)
 }
 
-// parityBlockContext builds an EVM block context whose coinbase is the real block
-// author. Bor zeroes header.Coinbase, so without this the EVM credits gas fees to
-// the zero address; resolving the consensus author makes fee/coinbase accounting
-// (used by the Parity stateDiff and the COINBASE opcode) match erigon.
-func (api *API) parityBlockContext(ctx context.Context, header *types.Header) vm.BlockContext {
-	var author *common.Address
-	if a, err := api.backend.Engine().Author(header); err == nil {
-		author = &a
+// parityBurntContract returns the Bor base-fee recipient (the "burnt contract")
+// active at the given block, or the zero address if none is configured. Bor
+// credits the base fee to this address in the state transition, but the native
+// prestate tracer doesn't look it up, so the Parity stateDiff must add it.
+func (api *API) parityBurntContract(blockNumber uint64) common.Address {
+	cfg := api.backend.ChainConfig()
+	if cfg.Bor == nil {
+		return common.Address{}
 	}
-	return core.NewEVMBlockContext(header, api.chainContext(ctx), author)
-}
-
-// parityBlockAuthor returns the consensus author (validator) for the header,
-// falling back to header.Coinbase if it cannot be recovered.
-func (api *API) parityBlockAuthor(header *types.Header) common.Address {
-	if a, err := api.backend.Engine().Author(header); err == nil {
-		return a
-	}
-	return header.Coinbase
+	return common.HexToAddress(cfg.Bor.CalculateBurntContract(blockNumber))
 }
 
 // blockByNumber is the wrapper of the chain access function offered by the backend.
@@ -1779,7 +1770,9 @@ func (api *API) traceBlockParityByHash(ctx context.Context, hash common.Hash, co
 	}
 	defer release()
 
-	blockCtx := api.parityBlockContext(ctx, block.Header())
+	// author=nil lets NewEVMBlockContext resolve the bor coinbase (CalculateCoinbase
+	// post-Rio), which is the real gas-fee tip recipient.
+	blockCtx := core.NewEVMBlockContext(block.Header(), api.chainContext(ctx), nil)
 	evm := vm.NewEVM(blockCtx, statedb, api.backend.ChainConfig(), vm.Config{})
 	if beaconRoot := block.BeaconRoot(); beaconRoot != nil {
 		core.ProcessBeaconBlockRoot(*beaconRoot, evm)

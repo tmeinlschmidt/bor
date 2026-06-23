@@ -207,6 +207,15 @@ func (api *API) parityStateDiffFor(
 		cfg.Timeout = baseConfig.Timeout
 	}
 
+	// The native prestate tracer doesn't track the Bor base-fee recipient (burnt
+	// contract), so snapshot its balance before/after the (re-)execution and add
+	// the diff manually below. traceTx executes the message on preState.
+	burnAddr := api.parityBurntContract(vmctx.BlockNumber.Uint64())
+	var burnPre *big.Int
+	if burnAddr != (common.Address{}) {
+		burnPre = preState.GetBalance(burnAddr).ToBig()
+	}
+
 	res, _, err := api.traceTx(ctx, tx, message, txctx, vmctx, preState, cfg, nil)
 	if err != nil {
 		return nil, err
@@ -224,5 +233,27 @@ func (api *API) parityStateDiffFor(
 		return nil, fmt.Errorf("unmarshal stateDiff result: %w", err)
 	}
 
-	return buildParityStateDiff(pd.Pre, pd.Post), nil
+	sd := buildParityStateDiff(pd.Pre, pd.Post)
+	if burnPre != nil {
+		addBalanceOnlyDiff(sd, burnAddr, burnPre, preState.GetBalance(burnAddr).ToBig())
+	}
+	return sd, nil
+}
+
+// addBalanceOnlyDiff adds a balance-only account change to the stateDiff when the
+// balance changed and the account isn't already present. Used for Bor fee
+// recipients that the native prestate tracer doesn't capture.
+func addBalanceOnlyDiff(sd parityStateDiff, addr common.Address, pre, post *big.Int) {
+	if pre.Cmp(post) == 0 {
+		return
+	}
+	if _, ok := sd[addr]; ok {
+		return
+	}
+	sd[addr] = &parityAccountDiff{
+		Balance: sdChanged((*hexutil.Big)(pre), (*hexutil.Big)(post)),
+		Code:    sdSame(),
+		Nonce:   sdSame(),
+		Storage: map[common.Hash]interface{}{},
+	}
 }

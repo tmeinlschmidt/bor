@@ -226,8 +226,6 @@ func (api *API) transactionParity(ctx context.Context, hash common.Hash, config 
 		return nil, err
 	}
 	defer release()
-	// Bor zeroes header.Coinbase; use the consensus author so COINBASE/fees resolve.
-	vmctx.Coinbase = api.parityBlockAuthor(block.Header())
 
 	txctx := &Context{
 		BlockHash:   blockHash,
