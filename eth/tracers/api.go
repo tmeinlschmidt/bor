@@ -111,6 +111,27 @@ func (api *API) chainContext(ctx context.Context) core.ChainContext {
 	return ethapi.NewChainContext(ctx, api.backend)
 }
 
+// parityBlockContext builds an EVM block context whose coinbase is the real block
+// author. Bor zeroes header.Coinbase, so without this the EVM credits gas fees to
+// the zero address; resolving the consensus author makes fee/coinbase accounting
+// (used by the Parity stateDiff and the COINBASE opcode) match erigon.
+func (api *API) parityBlockContext(ctx context.Context, header *types.Header) vm.BlockContext {
+	var author *common.Address
+	if a, err := api.backend.Engine().Author(header); err == nil {
+		author = &a
+	}
+	return core.NewEVMBlockContext(header, api.chainContext(ctx), author)
+}
+
+// parityBlockAuthor returns the consensus author (validator) for the header,
+// falling back to header.Coinbase if it cannot be recovered.
+func (api *API) parityBlockAuthor(header *types.Header) common.Address {
+	if a, err := api.backend.Engine().Author(header); err == nil {
+		return a
+	}
+	return header.Coinbase
+}
+
 // blockByNumber is the wrapper of the chain access function offered by the backend.
 // It will return an error if the block is not found.
 func (api *API) blockByNumber(ctx context.Context, number rpc.BlockNumber) (*types.Block, error) {
@@ -1732,7 +1753,7 @@ func (api *API) traceBlockParityByHash(ctx context.Context, hash common.Hash, co
 	}
 	defer release()
 
-	blockCtx := core.NewEVMBlockContext(block.Header(), api.chainContext(ctx), nil)
+	blockCtx := api.parityBlockContext(ctx, block.Header())
 	evm := vm.NewEVM(blockCtx, statedb, api.backend.ChainConfig(), vm.Config{})
 	if beaconRoot := block.BeaconRoot(); beaconRoot != nil {
 		core.ProcessBeaconBlockRoot(*beaconRoot, evm)

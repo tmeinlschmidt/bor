@@ -41,6 +41,9 @@ func (api *TraceAPI) ReplayTransaction(ctx context.Context, txHash common.Hash, 
 		return nil, err
 	}
 	defer release()
+	// Bor zeroes header.Coinbase; use the consensus author so the fee tip credits
+	// the validator (stateDiff) and COINBASE resolves correctly.
+	vmctx.Coinbase = api.parityBlockAuthor(block.Header())
 
 	txctx := &Context{
 		BlockHash:   blockHash,

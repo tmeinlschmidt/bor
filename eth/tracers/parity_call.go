@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"math/big"
 
-	"github.com/ethereum/go-ethereum/core"
 	"github.com/ethereum/go-ethereum/core/state"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/internal/ethapi"
@@ -143,7 +142,7 @@ func (api *API) traceCallState(ctx context.Context, blockNrOrHash rpc.BlockNumbe
 // outputs. It mirrors TraceCall's message-construction and basefee handling but
 // does not apply state/block overrides (not used by trace_call / trace_callMany).
 func (api *API) traceCallExec(ctx context.Context, args ethapi.TransactionArgs, block *types.Block, statedb *state.StateDB, set traceTypeSet) (*ReplayResult, error) {
-	blockCtx := core.NewEVMBlockContext(block.Header(), api.chainContext(ctx), nil)
+	blockCtx := api.parityBlockContext(ctx, block.Header())
 
 	if err := args.CallDefaults(api.backend.RPCGasCap(), blockCtx.BaseFee, api.backend.ChainConfig().ChainID); err != nil {
 		return nil, err
