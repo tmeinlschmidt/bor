@@ -26,6 +26,7 @@ import (
 	"os"
 	"runtime"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -1466,32 +1467,22 @@ func convertCallFrameToParityTraces(
 	output := getString("output")
 	value := getString("value")
 
-	// For top-level call (depth 0), the callTracer sets gas to tx.gasLimit.
-	// But Parity format needs the actual gas forwarded to the call (gasLimit - intrinsicGas).
-	// Calculate intrinsic gas and adjust if this is the top-level call.
-	if len(traceAddress) == 0 && tx != nil && gas != "" {
-		gasVal, err := hexutil.DecodeUint64(gas)
-		if err == nil {
-			// Calculate intrinsic gas
-			intrinsicGas := uint64(21000) // Base transaction cost
-			if tx.Data() != nil {
-				for _, b := range tx.Data() {
-					if b == 0 {
-						intrinsicGas += 4
-					} else {
-						intrinsicGas += 16
-					}
-				}
+	// Intrinsic gas applies only to the top-level call: the callTracer reports the
+	// full transaction gas (both limit and used), but Parity reports the gas
+	// forwarded to / used by the EVM call itself, i.e. excluding the transaction
+	// intrinsic gas. The same adjustment is applied to action.gas and result.gasUsed.
+	var intrinsicGas uint64
+	if len(traceAddress) == 0 && tx != nil {
+		intrinsicGas = 21000
+		for _, b := range tx.Data() {
+			if b == 0 {
+				intrinsicGas += 4
+			} else {
+				intrinsicGas += 16
 			}
-			// For contract creation, add creation gas
-			if tx.To() == nil {
-				intrinsicGas += 32000
-			}
-			// Gas forwarded to the call is tx.gasLimit - intrinsicGas
-			if gasVal > intrinsicGas {
-				gasForwarded := gasVal - intrinsicGas
-				gas = hexutil.EncodeUint64(gasForwarded)
-			}
+		}
+		if tx.To() == nil {
+			intrinsicGas += 32000
 		}
 	}
 
@@ -1515,11 +1506,25 @@ func convertCallFrameToParityTraces(
 		callType = &ct
 	}
 
+	// Parity/erigon omits calls to precompiles entirely, so filter them out of the
+	// direct subcalls before counting subtraces or assigning traceAddress indices.
+	childCalls := make([]map[string]interface{}, 0, len(calls))
+	for _, call := range calls {
+		callMap, ok := call.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		if isPrecompileFrame(callMap) {
+			continue
+		}
+		childCalls = append(childCalls, callMap)
+	}
+
 	// Build ParityTrace
 	trace := &ParityTrace{
 		Type:                traceType,
 		TraceAddress:        append([]uint64{}, traceAddress...),
-		Subtraces:           uint64(len(calls)),
+		Subtraces:           uint64(len(childCalls)),
 		TransactionHash:     &txHash,
 		TransactionPosition: &txIndex,
 		BlockHash:           &blockHash,
@@ -1540,6 +1545,9 @@ func convertCallFrameToParityTraces(
 
 	if gas != "" {
 		if g, err := hexutil.DecodeUint64(gas); err == nil {
+			if g > intrinsicGas {
+				g -= intrinsicGas
+			}
 			gasHex := hexutil.Uint64(g)
 			action.Gas = &gasHex
 		}
@@ -1554,11 +1562,16 @@ func convertCallFrameToParityTraces(
 		}
 	}
 
-	if value != "" {
-		if val, ok := new(big.Int).SetString(value, 0); ok {
-			bigVal := (*hexutil.Big)(val)
-			action.Value = bigVal
+	// Parity always includes a value field on call/create actions (default 0x0),
+	// even for staticcall/delegatecall which carry no value of their own.
+	if traceType == "call" || traceType == "create" {
+		val := new(big.Int)
+		if value != "" {
+			if pv, ok := new(big.Int).SetString(value, 0); ok {
+				val = pv
+			}
 		}
+		action.Value = (*hexutil.Big)(val)
 	}
 
 	if callType != nil {
@@ -1567,42 +1580,47 @@ func convertCallFrameToParityTraces(
 
 	trace.Action = action
 
-	// Build Result (if no error)
-	if errorStr == "" {
-		result := &ParityTraceResult{}
-		if gasUsed != "" {
-			if gu, err := hexutil.DecodeUint64(gasUsed); err == nil {
-				guHex := hexutil.Uint64(gu)
-				result.GasUsed = &guHex
+	// Build Result. Parity always returns a result object with gasUsed and output
+	// (output defaulting to "0x"), even for reverted calls; the error field, when
+	// present, is set in addition to the result.
+	result := &ParityTraceResult{}
+	if gasUsed != "" {
+		if gu, err := hexutil.DecodeUint64(gasUsed); err == nil {
+			if gu > intrinsicGas {
+				gu -= intrinsicGas
 			}
+			guHex := hexutil.Uint64(gu)
+			result.GasUsed = &guHex
 		}
+	}
+	if traceType == "create" && errorStr == "" {
 		if output != "" {
 			outputBytes := hexutil.MustDecode(output)
-			if traceType == "create" {
-				result.Code = (*hexutil.Bytes)(&outputBytes)
-				if toAddr, ok := frame["to"].(string); ok && toAddr != "" {
-					addr := common.HexToAddress(toAddr)
-					result.Address = &addr
-				}
-			} else {
-				result.Output = (*hexutil.Bytes)(&outputBytes)
-			}
+			result.Code = (*hexutil.Bytes)(&outputBytes)
 		}
-		trace.Result = result
-	} else {
-		// Set error
-		trace.Error = &errorStr
+		if toAddr, ok := frame["to"].(string); ok && toAddr != "" {
+			addr := common.HexToAddress(toAddr)
+			result.Address = &addr
+		}
+	} else if traceType != "suicide" {
+		outputBytes := []byte{}
+		if output != "" {
+			outputBytes = hexutil.MustDecode(output)
+		}
+		ob := hexutil.Bytes(outputBytes)
+		result.Output = &ob
+	}
+	trace.Result = result
+	if errorStr != "" {
+		e := parityErrorString(errorStr)
+		trace.Error = &e
 	}
 
 	// Add current trace
 	traces = append(traces, trace)
 
-	// Recursively process subcalls
-	for i, call := range calls {
-		callMap, ok := call.(map[string]interface{})
-		if !ok {
-			continue
-		}
+	// Recursively process the (non-precompile) subcalls.
+	for i, callMap := range childCalls {
 		subAddress := append(append([]uint64{}, traceAddress...), uint64(i))
 		subTraces, err := convertCallFrameToParityTraces(
 			callMap,
@@ -1611,7 +1629,7 @@ func convertCallFrameToParityTraces(
 			txIndex,
 			blockHash,
 			blockNumber,
-			nil, // tx is only needed for top-level call
+			nil, // tx is only needed for the top-level call
 		)
 		if err != nil {
 			return nil, err
@@ -1620,6 +1638,52 @@ func convertCallFrameToParityTraces(
 	}
 
 	return traces, nil
+}
+
+// isPrecompileFrame reports whether a callTracer subframe is a call to a
+// precompiled contract (addresses 0x01..0x0a). Parity/erigon trace output omits
+// precompile calls entirely.
+func isPrecompileFrame(frame map[string]interface{}) bool {
+	switch t, _ := frame["type"].(string); t {
+	case "CREATE", "CREATE2", "SELFDESTRUCT", "SUICIDE":
+		return false
+	}
+	toAddr, ok := frame["to"].(string)
+	if !ok || toAddr == "" {
+		return false
+	}
+	addr := common.HexToAddress(toAddr)
+	for i := 0; i < common.AddressLength-1; i++ {
+		if addr[i] != 0 {
+			return false
+		}
+	}
+	last := addr[common.AddressLength-1]
+	return last >= 0x01 && last <= 0x0a
+}
+
+// parityErrorString maps go-ethereum EVM error strings to the Parity/OpenEthereum
+// error names used by erigon's trace output.
+func parityErrorString(gethErr string) string {
+	switch gethErr {
+	case "execution reverted":
+		return "Reverted"
+	case "out of gas", "gas uint64 overflow", "contract creation code storage out of gas", "max code size exceeded":
+		return "Out of gas"
+	case "invalid jump destination":
+		return "Bad jump destination"
+	case "write protection":
+		return "Mutable Call In Static Context"
+	case "stack underflow":
+		return "Stack underflow"
+	}
+	switch {
+	case strings.HasPrefix(gethErr, "invalid opcode"):
+		return "Bad instruction"
+	case strings.HasPrefix(gethErr, "stack limit reached"):
+		return "Out of stack"
+	}
+	return gethErr
 }
 
 // TraceBlockParity returns the structured Parity-format traces for all transactions in a block.

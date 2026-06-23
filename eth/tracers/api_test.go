@@ -1598,8 +1598,13 @@ func TestConvertCallFrameToParityTraces(t *testing.T) {
 					return
 				}
 				trace := traces[0]
-				if trace.Error == nil || *trace.Error != "out of gas" {
-					t.Error("error field should be set")
+				// geth's "out of gas" is mapped to the Parity name "Out of gas".
+				if trace.Error == nil || *trace.Error != "Out of gas" {
+					t.Errorf("error field should be Parity-mapped, got %v", trace.Error)
+				}
+				// Parity still returns a result (gasUsed/output) on failure.
+				if trace.Result == nil || trace.Result.GasUsed == nil {
+					t.Error("result.gasUsed should be present even on error")
 				}
 			},
 		},
@@ -1618,7 +1623,7 @@ func TestConvertCallFrameToParityTraces(t *testing.T) {
 					map[string]interface{}{
 						"type":    "CALL",
 						"from":    "0x0000000000000000000000000000000000000002",
-						"to":      "0x0000000000000000000000000000000000000003",
+						"to":      "0x00000000000000000000000000000000000000ff",
 						"gas":     "0x5000",
 						"gasUsed": "0x3000",
 						"input":   "0x",
@@ -1642,6 +1647,81 @@ func TestConvertCallFrameToParityTraces(t *testing.T) {
 				// Validate child
 				if len(traces[1].TraceAddress) != 1 || traces[1].TraceAddress[0] != 0 {
 					t.Errorf("child should have traceAddress [0], got %v", traces[1].TraceAddress)
+				}
+			},
+		},
+		{
+			name: "precompile child is omitted",
+			callFrame: map[string]interface{}{
+				"type": "CALL", "from": "0xaa00000000000000000000000000000000000001",
+				"to": "0xbb00000000000000000000000000000000000002", "gas": "0x10000",
+				"gasUsed": "0x8000", "input": "0x", "output": "0x", "value": "0x0",
+				"calls": []interface{}{
+					// ecrecover precompile -> must be filtered out
+					map[string]interface{}{
+						"type": "STATICCALL", "from": "0xbb00000000000000000000000000000000000002",
+						"to":  "0x0000000000000000000000000000000000000001",
+						"gas": "0x1000", "gasUsed": "0xbb8", "input": "0x", "output": "0x",
+					},
+					// regular contract call -> kept, becomes traceAddress [0]
+					map[string]interface{}{
+						"type": "CALL", "from": "0xbb00000000000000000000000000000000000002",
+						"to":  "0xcc00000000000000000000000000000000000003",
+						"gas": "0x2000", "gasUsed": "0x1000", "input": "0x", "output": "0x", "value": "0x0",
+					},
+				},
+			},
+			validate: func(t *testing.T, traces []*ParityTrace) {
+				if len(traces) != 2 {
+					t.Fatalf("expected 2 traces (precompile filtered), got %d", len(traces))
+				}
+				if traces[0].Subtraces != 1 {
+					t.Errorf("expected 1 subtrace after filtering precompile, got %d", traces[0].Subtraces)
+				}
+				if traces[1].Action == nil || traces[1].Action.To == nil ||
+					*traces[1].Action.To != common.HexToAddress("0xcc00000000000000000000000000000000000003") {
+					t.Errorf("kept child should be the non-precompile call, got %+v", traces[1].Action)
+				}
+				if len(traces[1].TraceAddress) != 1 || traces[1].TraceAddress[0] != 0 {
+					t.Errorf("kept child should reindex to [0], got %v", traces[1].TraceAddress)
+				}
+			},
+		},
+		{
+			name: "reverted call keeps result and maps error",
+			callFrame: map[string]interface{}{
+				"type": "CALL", "from": "0xaa00000000000000000000000000000000000001",
+				"to": "0xbb00000000000000000000000000000000000002", "gas": "0x5208",
+				"gasUsed": "0x2e", "input": "0x", "output": "0x", "value": "0x0",
+				"error": "execution reverted",
+			},
+			validate: func(t *testing.T, traces []*ParityTrace) {
+				tr := traces[0]
+				if tr.Error == nil || *tr.Error != "Reverted" {
+					t.Errorf("expected error 'Reverted', got %v", tr.Error)
+				}
+				if tr.Result == nil || tr.Result.GasUsed == nil || uint64(*tr.Result.GasUsed) != 0x2e {
+					t.Errorf("expected result.gasUsed 0x2e on revert, got %+v", tr.Result)
+				}
+				if tr.Result.Output == nil || len(*tr.Result.Output) != 0 {
+					t.Errorf("expected empty output (0x) on revert, got %v", tr.Result.Output)
+				}
+			},
+		},
+		{
+			name: "staticcall has value 0x0 and empty output is 0x",
+			callFrame: map[string]interface{}{
+				"type": "STATICCALL", "from": "0xaa00000000000000000000000000000000000001",
+				"to": "0xbb00000000000000000000000000000000000002", "gas": "0x5208",
+				"gasUsed": "0x100", "input": "0x", "output": "0x",
+			},
+			validate: func(t *testing.T, traces []*ParityTrace) {
+				tr := traces[0]
+				if tr.Action == nil || tr.Action.Value == nil || tr.Action.Value.ToInt().Sign() != 0 {
+					t.Errorf("staticcall action.value should be 0x0, got %v", tr.Action.Value)
+				}
+				if tr.Result == nil || tr.Result.Output == nil {
+					t.Errorf("empty output should serialize as 0x (non-nil), got %+v", tr.Result)
 				}
 			},
 		},
