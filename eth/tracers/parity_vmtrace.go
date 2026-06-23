@@ -330,7 +330,9 @@ func vmTraceMemRegion(op vm.OpCode, stack []uint256.Int) (off uint64, size uint6
 		return val.Uint64(), true
 	}
 	switch op {
-	case vm.MSTORE:
+	case vm.MSTORE, vm.MLOAD:
+		// MSTORE writes and MLOAD reads a 32-byte word at offset = stack top; Parity
+		// reports the touched memory region for both.
 		if o, ok := top(1); ok {
 			return o, 32, true
 		}
