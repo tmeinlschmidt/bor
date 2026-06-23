@@ -1517,9 +1517,11 @@ func TestConvertCallFrameToParityTraces(t *testing.T) {
 	t.Parallel()
 
 	testCases := []struct {
-		name      string
-		callFrame map[string]interface{}
-		validate  func(t *testing.T, traces []*ParityTrace)
+		name         string
+		callFrame    map[string]interface{}
+		intrinsicGas uint64
+		refundGas    uint64
+		validate     func(t *testing.T, traces []*ParityTrace)
 	}{
 		{
 			name: "simple call",
@@ -1576,6 +1578,27 @@ func TestConvertCallFrameToParityTraces(t *testing.T) {
 				}
 				if trace.Result == nil || trace.Result.Code == nil {
 					t.Error("code field should be set for create result")
+				}
+				// create actions have no "to" and carry creationMethod instead.
+				if trace.Action.To != nil {
+					t.Errorf("create action must not have 'to', got %s", trace.Action.To)
+				}
+				if trace.Action.CreationMethod == nil || *trace.Action.CreationMethod != "create" {
+					t.Errorf("create action creationMethod should be 'create', got %v", trace.Action.CreationMethod)
+				}
+			},
+		},
+		{
+			name: "plain transfer reports zero gross gasUsed",
+			callFrame: map[string]interface{}{
+				"type": "CALL", "from": "0xaa00000000000000000000000000000000000001",
+				"to":  "0xbb00000000000000000000000000000000000002",
+				"gas": "0x5208", "gasUsed": "0x5208", "input": "0x", "output": "0x", "value": "0x1",
+			},
+			intrinsicGas: 0x5208, // whole tx is intrinsic, no EVM execution
+			validate: func(t *testing.T, traces []*ParityTrace) {
+				if traces[0].Result == nil || traces[0].Result.GasUsed == nil || uint64(*traces[0].Result.GasUsed) != 0 {
+					t.Errorf("plain transfer gross gasUsed should be 0, got %v", traces[0].Result.GasUsed)
 				}
 			},
 		},
@@ -1739,8 +1762,8 @@ func TestConvertCallFrameToParityTraces(t *testing.T) {
 				0,
 				blockHash,
 				100,
-				0, // no intrinsic-gas adjustment in unit tests
-				0, // no refund adjustment in unit tests
+				tc.intrinsicGas,
+				tc.refundGas,
 			)
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)

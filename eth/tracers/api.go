@@ -235,18 +235,19 @@ type ParityTrace struct {
 
 // ParityTraceAction represents the action field in a Parity trace.
 type ParityTraceAction struct {
-	From          *common.Address `json:"from,omitempty"`
-	To            *common.Address `json:"to,omitempty"`
-	CallType      *string         `json:"callType,omitempty"`
-	Gas           *hexutil.Uint64 `json:"gas,omitempty"`
-	Input         *hexutil.Bytes  `json:"input,omitempty"`
-	Value         *hexutil.Big    `json:"value,omitempty"`
-	Init          *hexutil.Bytes  `json:"init,omitempty"`
-	Address       *common.Address `json:"address,omitempty"`
-	RefundAddress *common.Address `json:"refundAddress,omitempty"`
-	Balance       *hexutil.Big    `json:"balance,omitempty"`
-	Author        *common.Address `json:"author,omitempty"`
-	RewardType    *string         `json:"rewardType,omitempty"`
+	From           *common.Address `json:"from,omitempty"`
+	To             *common.Address `json:"to,omitempty"`
+	CallType       *string         `json:"callType,omitempty"`
+	CreationMethod *string         `json:"creationMethod,omitempty"`
+	Gas            *hexutil.Uint64 `json:"gas,omitempty"`
+	Input          *hexutil.Bytes  `json:"input,omitempty"`
+	Value          *hexutil.Big    `json:"value,omitempty"`
+	Init           *hexutil.Bytes  `json:"init,omitempty"`
+	Address        *common.Address `json:"address,omitempty"`
+	RefundAddress  *common.Address `json:"refundAddress,omitempty"`
+	Balance        *hexutil.Big    `json:"balance,omitempty"`
+	Author         *common.Address `json:"author,omitempty"`
+	RewardType     *string         `json:"rewardType,omitempty"`
 }
 
 // ParityTraceResult represents the result field in a Parity trace.
@@ -1525,14 +1526,23 @@ func convertCallFrameToParityTraces(
 		action.From = &from
 	}
 
-	if toAddr, ok := frame["to"].(string); ok && toAddr != "" {
+	// create actions carry no "to"; they use creationMethod and report the new
+	// contract address in result.address instead.
+	if toAddr, ok := frame["to"].(string); ok && toAddr != "" && traceType != "create" {
 		to := common.HexToAddress(toAddr)
 		action.To = &to
+	}
+	if traceType == "create" {
+		cm := "create"
+		if typeStr == "CREATE2" {
+			cm = "create2"
+		}
+		action.CreationMethod = &cm
 	}
 
 	if gas != "" {
 		if g, err := hexutil.DecodeUint64(gas); err == nil {
-			if g > intrinsicGas {
+			if g >= intrinsicGas {
 				g -= intrinsicGas
 			}
 			gasHex := hexutil.Uint64(g)
@@ -1577,7 +1587,7 @@ func convertCallFrameToParityTraces(
 			// value (post-refund, intrinsic-inclusive), so add the refund back and
 			// subtract intrinsic. refundGas/intrinsicGas are 0 for subcalls.
 			gu += refundGas
-			if gu > intrinsicGas {
+			if gu >= intrinsicGas {
 				gu -= intrinsicGas
 			}
 			guHex := hexutil.Uint64(gu)
