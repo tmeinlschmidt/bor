@@ -63,10 +63,10 @@ type vmTraceMem struct {
 	Data hexutil.Bytes `json:"data"`
 }
 
-// vmTraceSto is an SSTORE: the key/value written (each 32-byte hex).
+// vmTraceSto is an SSTORE: the key/value written, as minimal hex quantities.
 type vmTraceSto struct {
-	Key common.Hash `json:"key"`
-	Val common.Hash `json:"val"`
+	Key string `json:"key"`
+	Val string `json:"val"`
 }
 
 // vmTracePending holds the still-open op of a frame whose post-op effects
@@ -76,6 +76,10 @@ type vmTracePending struct {
 	opcode   vm.OpCode // the executed opcode (for push count / mem region)
 	gasStart uint64
 	preStack []uint256.Int // copy of pre-op stack (bottom-first) for mem operands
+	// retLen is the length of return data produced by a sub-call opened by this op
+	// (set on the child's OnExit); used to size the call's written memory region.
+	retLen    uint64
+	retLenSet bool
 }
 
 // vmTraceState is the per-frame bookkeeping kept on a stack mirroring the EVM
@@ -157,7 +161,9 @@ func (t *parityVMTracer) OnEnter(depth int, typ byte, _ common.Address, to commo
 
 // OnExit pops the current frame, finalizing its last pending op (no scope is
 // available, so push/mem are empty — acceptable for terminal STOP/RETURN/REVERT).
-func (t *parityVMTracer) OnExit(_ int, _ []byte, _ uint64, _ error, _ bool) {
+// It also records the frame's return-data length on the parent's call op so that
+// op's written memory (the return-data region) can be sized correctly.
+func (t *parityVMTracer) OnExit(_ int, output []byte, _ uint64, _ error, _ bool) {
 	if t.interrupt.Load() {
 		return
 	}
@@ -170,6 +176,14 @@ func (t *parityVMTracer) OnExit(_ int, _ []byte, _ uint64, _ error, _ bool) {
 		cur.pending = nil
 	}
 	t.stack = t.stack[:len(t.stack)-1]
+
+	// Record return-data length on the parent's call op.
+	if len(t.stack) > 0 {
+		if parent := t.stack[len(t.stack)-1]; parent.pending != nil {
+			parent.pending.retLen = uint64(len(output))
+			parent.pending.retLenSet = true
+		}
+	}
 }
 
 // OnOpcode records a new op for the current frame and, via look-ahead, finalizes
@@ -206,9 +220,10 @@ func (t *parityVMTracer) OnOpcode(pc uint64, opcode byte, gas, cost uint64, scop
 	if op == vm.SSTORE {
 		data := scope.StackData()
 		if n := len(data); n >= 2 {
-			key := common.Hash(data[n-1].Bytes32())
-			val := common.Hash(data[n-2].Bytes32())
-			store = &vmTraceSto{Key: key, Val: val}
+			store = &vmTraceSto{
+				Key: hexutil.EncodeBig(data[n-1].ToBig()),
+				Val: hexutil.EncodeBig(data[n-2].ToBig()),
+			}
 		}
 	}
 
@@ -247,8 +262,17 @@ func (t *parityVMTracer) finalizeWithScope(p *vmTracePending, scope tracing.OpCo
 	}
 	// mem = the exact region the op wrote, read from post-op memory.
 	if off, size, writes := vmTraceMemRegion(p.opcode, p.preStack); writes {
+		// For calls, only the actually-returned bytes are copied (min of retSize
+		// and the callee's return-data length).
+		if vmTraceIsCall(p.opcode) {
+			if !p.retLenSet || p.retLen == 0 {
+				size = 0
+			} else if p.retLen < size {
+				size = p.retLen
+			}
+		}
 		mem := scope.MemoryData()
-		if off+size <= uint64(len(mem)) {
+		if size > 0 && off+size <= uint64(len(mem)) {
 			p.op.Ex.Mem = &vmTraceMem{Off: int(off), Data: append(hexutil.Bytes{}, mem[off:off+size]...)}
 		}
 	}
@@ -352,8 +376,32 @@ func vmTraceMemRegion(op vm.OpCode, stack []uint256.Int) (off uint64, size uint6
 		if ok2 && ok4 && l != 0 {
 			return o, l, true
 		}
+	case vm.CALL, vm.CALLCODE:
+		// args: gas, addr, value, argsOff, argsLen, retOff, retLen -> retOff=top(6), retLen=top(7)
+		o, ok6 := top(6)
+		l, ok7 := top(7)
+		if ok6 && ok7 && l != 0 {
+			return o, l, true
+		}
+	case vm.DELEGATECALL, vm.STATICCALL:
+		// args: gas, addr, argsOff, argsLen, retOff, retLen -> retOff=top(5), retLen=top(6)
+		o, ok5 := top(5)
+		l, ok6 := top(6)
+		if ok5 && ok6 && l != 0 {
+			return o, l, true
+		}
 	}
 	return 0, 0, false
+}
+
+// vmTraceIsCall reports whether the opcode is a call-type op whose written memory
+// (the return-data region) must be capped to the actual returned data length.
+func vmTraceIsCall(op vm.OpCode) bool {
+	switch op {
+	case vm.CALL, vm.CALLCODE, vm.DELEGATECALL, vm.STATICCALL:
+		return true
+	}
+	return false
 }
 
 // GetResult marshals the root frame as the vmTrace object. For a plain value
