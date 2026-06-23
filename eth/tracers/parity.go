@@ -136,7 +136,18 @@ func (api *API) parityTraceTx(
 		txIndex = uint64(txctx.TxIndex)
 	}
 
-	traces, err := convertCallFrameToParityTraces(callFrame, []uint64{}, txHash, txIndex, blockHash, blockNumber, tx)
+	// Compute the exact transaction intrinsic gas so the root trace's gas/gasUsed
+	// exclude it (Parity/erigon semantics). Using core.IntrinsicGas handles access
+	// lists, auth lists and the relevant EIPs precisely.
+	var intrinsicGas uint64
+	if message != nil {
+		rules := api.backend.ChainConfig().Rules(vmctx.BlockNumber, vmctx.Random != nil, vmctx.Time)
+		if ig, ierr := core.IntrinsicGas(message.Data, message.AccessList, message.SetCodeAuthorizations, message.To == nil, rules.IsHomestead, rules.IsIstanbul, rules.IsShanghai); ierr == nil {
+			intrinsicGas = ig
+		}
+	}
+
+	traces, err := convertCallFrameToParityTraces(callFrame, []uint64{}, txHash, txIndex, blockHash, blockNumber, intrinsicGas)
 	if err != nil {
 		return nil, nil, 0, fmt.Errorf("convert trace: %w", err)
 	}

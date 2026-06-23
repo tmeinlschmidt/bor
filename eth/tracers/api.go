@@ -1432,7 +1432,7 @@ func convertCallFrameToParityTraces(
 	txIndex uint64,
 	blockHash common.Hash,
 	blockNumber uint64,
-	tx *types.Transaction,
+	intrinsicGas uint64,
 ) ([]*ParityTrace, error) {
 	traces := make([]*ParityTrace, 0)
 
@@ -1467,24 +1467,10 @@ func convertCallFrameToParityTraces(
 	output := getString("output")
 	value := getString("value")
 
-	// Intrinsic gas applies only to the top-level call: the callTracer reports the
-	// full transaction gas (both limit and used), but Parity reports the gas
-	// forwarded to / used by the EVM call itself, i.e. excluding the transaction
-	// intrinsic gas. The same adjustment is applied to action.gas and result.gasUsed.
-	var intrinsicGas uint64
-	if len(traceAddress) == 0 && tx != nil {
-		intrinsicGas = 21000
-		for _, b := range tx.Data() {
-			if b == 0 {
-				intrinsicGas += 4
-			} else {
-				intrinsicGas += 16
-			}
-		}
-		if tx.To() == nil {
-			intrinsicGas += 32000
-		}
-	}
+	// intrinsicGas is nonzero only for the top-level call (callers pass the exact
+	// transaction intrinsic gas there and 0 for subcalls). It is subtracted from
+	// action.gas and result.gasUsed below so they reflect the gas available to /
+	// used by the EVM call itself, matching Parity/erigon.
 
 	// Determine trace type
 	traceType := "call"
@@ -1629,7 +1615,7 @@ func convertCallFrameToParityTraces(
 			txIndex,
 			blockHash,
 			blockNumber,
-			nil, // tx is only needed for the top-level call
+			0, // intrinsicGas applies only to the top-level call
 		)
 		if err != nil {
 			return nil, err

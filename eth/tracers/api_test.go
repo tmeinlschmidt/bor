@@ -1739,7 +1739,7 @@ func TestConvertCallFrameToParityTraces(t *testing.T) {
 				0,
 				blockHash,
 				100,
-				nil, // tx not needed for tests
+				0, // no intrinsic-gas adjustment in unit tests
 			)
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
