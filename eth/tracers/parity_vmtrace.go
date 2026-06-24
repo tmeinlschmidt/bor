@@ -77,10 +77,9 @@ type vmTracePending struct {
 	opcode   vm.OpCode // the executed opcode (for push count / mem region)
 	gasStart uint64
 	preStack []uint256.Int // copy of pre-op stack (bottom-first) for mem operands
-	// retLen is the length of return data produced by a sub-call opened by this op
-	// (set on the child's OnExit); used to size the call's written memory region.
-	retLen    uint64
-	retLenSet bool
+	// retOff/retLen are the declared return-data region of a call op opened by this
+	// op (retOff/retSize operands). erigon reports the FULL declared region from
+	// post-call memory, zero-padded — not capped to the actual returned length.
 }
 
 // vmTraceState is the per-frame bookkeeping kept on a stack mirroring the EVM
@@ -179,9 +178,7 @@ func (t *parityVMTracer) OnEnter(depth int, typ byte, _ common.Address, to commo
 
 // OnExit pops the current frame, finalizing its last pending op (no scope is
 // available, so push/mem are empty — acceptable for terminal STOP/RETURN/REVERT).
-// It also records the frame's return-data length on the parent's call op so that
-// op's written memory (the return-data region) can be sized correctly.
-func (t *parityVMTracer) OnExit(_ int, output []byte, _ uint64, _ error, _ bool) {
+func (t *parityVMTracer) OnExit(_ int, _ []byte, _ uint64, _ error, _ bool) {
 	if t.interrupt.Load() {
 		return
 	}
@@ -194,14 +191,6 @@ func (t *parityVMTracer) OnExit(_ int, output []byte, _ uint64, _ error, _ bool)
 		cur.pending = nil
 	}
 	t.stack = t.stack[:len(t.stack)-1]
-
-	// Record return-data length on the parent's call op.
-	if len(t.stack) > 0 {
-		if parent := t.stack[len(t.stack)-1]; parent.pending != nil {
-			parent.pending.retLen = uint64(len(output))
-			parent.pending.retLenSet = true
-		}
-	}
 }
 
 // OnOpcode records a new op for the current frame and, via look-ahead, finalizes
@@ -278,21 +267,21 @@ func (t *parityVMTracer) finalizeWithScope(p *vmTracePending, scope tracing.OpCo
 		}
 		p.op.Ex.Push = push
 	}
-	// mem = the exact region the op wrote, read from post-op memory.
+	// mem = the region the op touched, read from post-op memory. erigon reports the
+	// FULL declared region (MSTORE/MLOAD = 32, COPY/CALL = declared length) and
+	// zero-pads when memory is shorter — it does NOT cap a call to the actually
+	// returned byte count. Mirror that with a zero-padded copy.
 	if off, size, writes := vmTraceMemRegion(p.opcode, p.preStack); writes {
-		// For calls, only the actually-returned bytes are copied (min of retSize
-		// and the callee's return-data length).
-		if vmTraceIsCall(p.opcode) {
-			if !p.retLenSet || p.retLen == 0 {
-				size = 0
-			} else if p.retLen < size {
-				size = p.retLen
-			}
-		}
 		mem := scope.MemoryData()
-		if size > 0 && off+size <= uint64(len(mem)) {
-			p.op.Ex.Mem = &vmTraceMem{Off: int(off), Data: append(hexutil.Bytes{}, mem[off:off+size]...)}
+		data := make([]byte, size)
+		if off < uint64(len(mem)) {
+			end := off + size
+			if end > uint64(len(mem)) {
+				end = uint64(len(mem))
+			}
+			copy(data, mem[off:end])
 		}
+		p.op.Ex.Mem = &vmTraceMem{Off: int(off), Data: data}
 	}
 }
 
@@ -315,7 +304,7 @@ func vmTraceOpPushCount(op vm.OpCode) int {
 		return 1
 	case vm.LT, vm.GT, vm.SLT, vm.SGT, vm.EQ, vm.ISZERO,
 		vm.AND, vm.OR, vm.XOR, vm.NOT, vm.BYTE,
-		vm.SHL, vm.SHR, vm.SAR, vm.CLZ:
+		vm.SHL, vm.SHR, vm.SAR:
 		return 1
 	case vm.KECCAK256:
 		return 1
@@ -325,9 +314,9 @@ func vmTraceOpPushCount(op vm.OpCode) int {
 		return 1
 	case vm.BLOCKHASH, vm.COINBASE, vm.TIMESTAMP, vm.NUMBER,
 		vm.DIFFICULTY, vm.GASLIMIT,
-		vm.CHAINID, vm.SELFBALANCE, vm.BASEFEE, vm.BLOBHASH, vm.BLOBBASEFEE:
+		vm.CHAINID, vm.SELFBALANCE, vm.BASEFEE:
 		return 1
-	case vm.MLOAD, vm.SLOAD, vm.TLOAD, vm.PC, vm.MSIZE, vm.GAS:
+	case vm.MLOAD, vm.SLOAD, vm.PC, vm.MSIZE, vm.GAS:
 		return 1
 	case vm.CREATE, vm.CREATE2, vm.CALL, vm.CALLCODE,
 		vm.DELEGATECALL, vm.STATICCALL:
@@ -410,16 +399,6 @@ func vmTraceMemRegion(op vm.OpCode, stack []uint256.Int) (off uint64, size uint6
 		}
 	}
 	return 0, 0, false
-}
-
-// vmTraceIsCall reports whether the opcode is a call-type op whose written memory
-// (the return-data region) must be capped to the actual returned data length.
-func vmTraceIsCall(op vm.OpCode) bool {
-	switch op {
-	case vm.CALL, vm.CALLCODE, vm.DELEGATECALL, vm.STATICCALL:
-		return true
-	}
-	return false
 }
 
 // GetResult marshals the root frame as the vmTrace object. For a plain value
