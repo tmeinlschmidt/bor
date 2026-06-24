@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"math/big"
 
 	"github.com/ethereum/go-ethereum/core"
 	"github.com/ethereum/go-ethereum/core/state"
@@ -151,13 +150,10 @@ func (api *API) traceCallExec(ctx context.Context, args ethapi.TransactionArgs, 
 	msg := args.ToMessage(blockCtx.BaseFee, true)
 	tx := args.ToTransaction(types.LegacyTxType)
 
-	// Lower the basefee to 0 to avoid breaking EVM invariants (basefee < feecap).
-	if msg.GasPrice.Sign() == 0 {
-		blockCtx.BaseFee = new(big.Int)
-	}
-	if msg.BlobGasFeeCap != nil && msg.BlobGasFeeCap.BitLen() == 0 {
-		blockCtx.BlobBaseFee = new(big.Int)
-	}
+	// NOTE: unlike eth_call we do NOT zero blockCtx.BaseFee when the call has no
+	// gas price. traceTx runs with NoBaseFee, so the basefee<feecap invariant is
+	// not enforced, and keeping the real basefee makes the BASEFEE opcode and the
+	// base-fee burn (burnt-contract stateDiff) match erigon.
 
 	result := &ReplayResult{}
 
