@@ -154,6 +154,10 @@ func (t *parityVMTracer) OnEnter(depth int, typ byte, _ common.Address, to commo
 	switch op {
 	case vm.CREATE, vm.CREATE2:
 		frame.Code = append(hexutil.Bytes{}, input...)
+	case vm.SELFDESTRUCT:
+		// A SELFDESTRUCT enters a frame only to transfer the balance to the
+		// beneficiary; no code executes there, so erigon reports empty code.
+		// Leave frame.Code empty (do NOT resolve the beneficiary's code).
 	default:
 		if t.statedb != nil {
 			frame.Code = append(hexutil.Bytes{}, t.statedb.GetCode(to)...)
