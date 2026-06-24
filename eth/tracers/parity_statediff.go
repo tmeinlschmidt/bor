@@ -121,15 +121,12 @@ func buildParityStateDiff(pre, post map[common.Address]*prestateAccount) parityS
 
 		switch {
 		case postAcc == nil:
-			// In pre only -> account was deleted.
+			// In pre only -> account was deleted. erigon's CompareStates emits only
+			// balance/code/nonce "-" for a deleted account and NO storage entries
+			// (storage "-" is never produced), so leave Storage empty.
 			acc.Balance = sdRemoved(balVal(preAcc))
 			acc.Nonce = sdRemoved(nonceVal(preAcc))
 			acc.Code = sdRemoved(codeVal(preAcc))
-			if preAcc != nil {
-				for slot, val := range preAcc.Storage {
-					acc.Storage[slot] = sdRemoved(val)
-				}
-			}
 
 		case isEmptyAccount(preAcc):
 			// Empty pre-state with post values -> account was created.
@@ -188,6 +185,10 @@ func buildParityStateDiff(pre, post map[common.Address]*prestateAccount) parityS
 // preState MUST be a pre-execution copy of the state (e.g. statedb.Copy()): the
 // tracer re-executes the message and advances the state it is given, so callers
 // pass a throwaway copy rather than the canonical state used for trace output.
+// feeless reports whether the message is a trace_call/trace_callMany simulation.
+// erigon runs those with gas bailout: the gas fee is NOT debited from the sender
+// (only the base-fee burn and any tip appear). We execute the full state
+// transition, so when feeless we add the sender's gas debit back below.
 func (api *API) parityStateDiffFor(
 	ctx context.Context,
 	tx *types.Transaction,
@@ -196,6 +197,7 @@ func (api *API) parityStateDiffFor(
 	vmctx vm.BlockContext,
 	preState *state.StateDB,
 	baseConfig *TraceConfig,
+	feeless bool,
 ) (parityStateDiff, error) {
 	prestate := "prestateTracer"
 	cfg := &TraceConfig{
@@ -215,8 +217,14 @@ func (api *API) parityStateDiffFor(
 	if burnAddr != (common.Address{}) {
 		burnPre = preState.GetBalance(burnAddr).ToBig()
 	}
+	// Snapshot the sender balance before execution so a feeless simulation can
+	// reconstruct the erigon (no-gas-debit) sender balance afterwards.
+	var senderPre *big.Int
+	if feeless {
+		senderPre = preState.GetBalance(message.From).ToBig()
+	}
 
-	res, _, err := api.traceTx(ctx, tx, message, txctx, vmctx, preState, cfg, nil)
+	res, usedGas, err := api.traceTx(ctx, tx, message, txctx, vmctx, preState, cfg, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -237,7 +245,31 @@ func (api *API) parityStateDiffFor(
 	if burnPre != nil {
 		addBalanceOnlyDiff(sd, burnAddr, burnPre, preState.GetBalance(burnAddr).ToBig())
 	}
+	if feeless {
+		// erigon's trace_call does not debit the sender for gas. Our execution did
+		// (net debit = usedGas * effectiveGasPrice), so add it back: the corrected
+		// post-balance is the actual post-balance plus the gas charge.
+		gasCharge := new(big.Int).Mul(new(big.Int).SetUint64(usedGas), message.GasPrice)
+		correctedPost := new(big.Int).Add(preState.GetBalance(message.From).ToBig(), gasCharge)
+		setSenderBalanceDiff(sd, message.From, senderPre, correctedPost)
+	}
 	return sd, nil
+}
+
+// setSenderBalanceDiff overrides the sender account's balance change in the diff
+// (the sender always appears because its nonce is bumped). If pre == post the
+// balance becomes "=" while the rest of the account diff (nonce, etc.) is kept.
+func setSenderBalanceDiff(sd parityStateDiff, addr common.Address, pre, post *big.Int) {
+	acc, ok := sd[addr]
+	if !ok {
+		addBalanceOnlyDiff(sd, addr, pre, post)
+		return
+	}
+	if pre.Cmp(post) == 0 {
+		acc.Balance = sdSame()
+		return
+	}
+	acc.Balance = sdChanged((*hexutil.Big)(pre), (*hexutil.Big)(post))
 }
 
 // addBalanceOnlyDiff adds a balance-only account change to the stateDiff when the
