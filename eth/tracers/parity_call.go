@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math/big"
 
 	"github.com/ethereum/go-ethereum/core"
 	"github.com/ethereum/go-ethereum/core/state"
@@ -150,10 +151,13 @@ func (api *API) traceCallExec(ctx context.Context, args ethapi.TransactionArgs, 
 	msg := args.ToMessage(blockCtx.BaseFee, true)
 	tx := args.ToTransaction(types.LegacyTxType)
 
-	// NOTE: unlike eth_call we do NOT zero blockCtx.BaseFee when the call has no
-	// gas price. traceTx runs with NoBaseFee, so the basefee<feecap invariant is
-	// not enforced, and keeping the real basefee makes the BASEFEE opcode and the
-	// base-fee burn (burnt-contract stateDiff) match erigon.
+	// trace_call is a feeless simulation (erigon semantics): no gas fee is charged
+	// to the sender, the burnt contract or the coinbase — only the call's own state
+	// effects appear. Zero the message gas price and the block basefee so the state
+	// transition performs no fee accounting. traceTx runs with NoBaseFee, so the
+	// basefee<feecap invariant is not enforced.
+	msg.GasPrice = new(big.Int)
+	blockCtx.BaseFee = new(big.Int)
 
 	result := &ReplayResult{}
 
