@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math/big"
+	"strconv"
 	"sync/atomic"
 
 	"github.com/holiman/uint256"
@@ -93,16 +94,33 @@ type vmTraceState struct {
 
 // parityVMTracer implements the Parity/OpenEthereum vmTrace (opcode-level trace).
 type parityVMTracer struct {
-	statedb   tracing.StateDB
-	root      *vmTraceFrame
-	stack     []*vmTraceState // index 0 == root frame
-	interrupt atomic.Bool
-	reason    error
+	statedb    tracing.StateDB
+	root       *vmTraceFrame
+	stack      []*vmTraceState // index 0 == root frame
+	rootPrefix string          // idx prefix of the root frame (tx index, or "" for trace_call)
+	interrupt  atomic.Bool
+	reason     error
 }
 
-// newParityVMTracer constructs the vmTrace tracer.
-func newParityVMTracer(_ *Context, _ json.RawMessage, _ *params.ChainConfig) (*Tracer, error) {
-	t := &parityVMTracer{}
+// vmTraceJoinIdx builds an op idx from a frame prefix and op index. An empty
+// prefix (trace_call's root) yields just the index ("0","1",...); otherwise
+// "<prefix>-<i>" (e.g. "25-0" for tx index 25, "25-3-0" for a subcall).
+func vmTraceJoinIdx(prefix string, i int) string {
+	if prefix == "" {
+		return strconv.Itoa(i)
+	}
+	return prefix + "-" + strconv.Itoa(i)
+}
+
+// newParityVMTracer constructs the vmTrace tracer. The root idx prefix is the
+// transaction's index within its block (replay methods); for trace_call there is
+// no transaction, so the prefix is empty.
+func newParityVMTracer(ctx *Context, _ json.RawMessage, _ *params.ChainConfig) (*Tracer, error) {
+	rootPrefix := ""
+	if ctx != nil && ctx.TxHash != (common.Hash{}) {
+		rootPrefix = strconv.Itoa(ctx.TxIndex)
+	}
+	t := &parityVMTracer{rootPrefix: rootPrefix}
 	return &Tracer{
 		Hooks: &tracing.Hooks{
 			OnTxStart: t.OnTxStart,
@@ -145,12 +163,12 @@ func (t *parityVMTracer) OnEnter(depth int, typ byte, _ common.Address, to commo
 
 	if depth == 0 || len(t.stack) == 0 {
 		t.root = frame
-		t.stack = []*vmTraceState{{frame: frame, prefix: "0"}}
+		t.stack = []*vmTraceState{{frame: frame, prefix: t.rootPrefix}}
 		return
 	}
 
 	parent := t.stack[len(t.stack)-1]
-	prefix := "0"
+	prefix := t.rootPrefix
 	if parent.pending != nil {
 		// Attach the sub-frame to the call op that opened it.
 		parent.pending.op.Sub = frame
@@ -210,7 +228,7 @@ func (t *parityVMTracer) OnOpcode(pc uint64, opcode byte, gas, cost uint64, scop
 		PC:   pc,
 		Cost: cost,
 		Op:   op.String(),
-		Idx:  fmt.Sprintf("%s-%d", cur.prefix, cur.next),
+		Idx:  vmTraceJoinIdx(cur.prefix, cur.next),
 	}
 	cur.next++
 	cur.frame.Ops = append(cur.frame.Ops, entry)
