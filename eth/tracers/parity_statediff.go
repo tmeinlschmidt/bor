@@ -202,7 +202,7 @@ func (api *API) parityStateDiffFor(
 	prestate := "prestateTracer"
 	cfg := &TraceConfig{
 		Tracer:       &prestate,
-		TracerConfig: json.RawMessage(`{"diffMode":true}`),
+		TracerConfig: json.RawMessage(`{"diffMode":true,"excludeCreatedDestroyed":true}`),
 	}
 	if baseConfig != nil {
 		cfg.Reexec = baseConfig.Reexec

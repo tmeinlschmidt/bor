@@ -79,6 +79,11 @@ type prestateTracerConfig struct {
 	DisableCode    bool `json:"disableCode"`    // If true, this tracer will not return the contract code
 	DisableStorage bool `json:"disableStorage"` // If true, this tracer will not return the contract storage
 	IncludeEmpty   bool `json:"includeEmpty"`   // If true, this tracer will return empty state objects
+	// ExcludeCreatedDestroyed, in diffMode, omits accounts that were both created
+	// and destroyed within the transaction (they did not exist before and do not
+	// exist after, so they have no net state change). Used by the Parity/erigon
+	// stateDiff conversion, which never reports such transient accounts.
+	ExcludeCreatedDestroyed bool `json:"excludeCreatedDestroyed"`
 }
 
 func newPrestateTracer(ctx *tracers.Context, cfg json.RawMessage, chainConfig *params.ChainConfig) (*tracers.Tracer, error) {
@@ -264,6 +269,12 @@ func (t *prestateTracer) processDiffState() {
 	for addr, state := range t.pre {
 		// The deleted account's state is pruned from `post` but kept in `pre`
 		if _, ok := t.deleted[addr]; ok {
+			// An account both created and destroyed in this tx never existed
+			// before and does not exist after; omit it entirely when requested
+			// (Parity/erigon stateDiff semantics).
+			if t.config.ExcludeCreatedDestroyed && t.created[addr] {
+				delete(t.pre, addr)
+			}
 			continue
 		}
 
