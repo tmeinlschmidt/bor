@@ -371,7 +371,10 @@ func vmTraceMemRegion(op vm.OpCode, stack []uint256.Int) (off uint64, size uint6
 		if o, ok := top(1); ok {
 			return o, 1, true
 		}
-	case vm.CALLDATACOPY, vm.CODECOPY, vm.RETURNDATACOPY, vm.MCOPY:
+	case vm.CALLDATACOPY, vm.CODECOPY, vm.RETURNDATACOPY:
+		// NB: MCOPY is intentionally excluded — erigon's OeTracer does not record a
+		// mem region for MCOPY (it is absent from its setMem switch), so it must
+		// stay out here to match.
 		o, ok1 := top(1)
 		l, ok3 := top(3)
 		if ok1 && ok3 && l != 0 {
