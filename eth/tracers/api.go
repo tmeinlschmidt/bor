@@ -50,8 +50,11 @@ import (
 
 const (
 	// defaultTraceTimeout is the amount of time a single transaction can execute
-	// by default before being forcefully aborted.
-	defaultTraceTimeout = 5 * time.Second
+	// by default before being forcefully aborted. Parity-style trace_* replay of
+	// heavy historical transactions (deep account-abstraction call trees) can
+	// exceed a few seconds, so the default is generous; the trace namespace is
+	// opt-in (--rpc.enabletrace) and intended for archive nodes.
+	defaultTraceTimeout = 60 * time.Second
 
 	// defaultTraceReexec is the number of blocks the tracer is willing to go back
 	// and reexecute to produce missing historical state necessary to run a specific
@@ -1514,7 +1517,9 @@ func convertCallFrameToParityTraces(
 		if !ok {
 			continue
 		}
-		if isPrecompileFrame(callMap) {
+		// Children of any frame are sub-calls (deep == true); the top-level frame is
+		// never run through this filter (it is added unconditionally by the caller).
+		if isPrecompileFrame(callMap, true) {
 			continue
 		}
 		childCalls = append(childCalls, callMap)
@@ -1689,10 +1694,15 @@ func convertCallFrameToParityTraces(
 	return traces, nil
 }
 
-// isPrecompileFrame reports whether a callTracer subframe is a call to a
-// precompiled contract (addresses 0x01..0x0a). Parity/erigon trace output omits
-// precompile calls entirely.
-func isPrecompileFrame(frame map[string]interface{}) bool {
+// isPrecompileFrame reports whether a callTracer subframe is a precompile call
+// that Parity/erigon omits from the trace list. erigon omits a precompile call
+// only when it is a sub-call (deep) AND carries zero value; top-level calls and
+// value-bearing calls to a precompile are kept. See erigon trace_adhoc.go
+// captureStartOrEnter: if precompile && deep && (value == nil || value.IsZero()).
+func isPrecompileFrame(frame map[string]interface{}, deep bool) bool {
+	if !deep {
+		return false
+	}
 	switch t, _ := frame["type"].(string); t {
 	case "CREATE", "CREATE2", "SELFDESTRUCT", "SUICIDE":
 		return false
@@ -1708,7 +1718,16 @@ func isPrecompileFrame(frame map[string]interface{}) bool {
 		}
 	}
 	last := addr[common.AddressLength-1]
-	return last >= 0x01 && last <= 0x0a
+	if last < 0x01 || last > 0x0a {
+		return false
+	}
+	// A precompile call that transfers value is kept; only zero-value ones omitted.
+	if v, ok := frame["value"].(string); ok && v != "" {
+		if val, ok := new(big.Int).SetString(v, 0); ok && val.Sign() != 0 {
+			return false
+		}
+	}
+	return true
 }
 
 // TraceBlockParity returns the structured Parity-format traces for all transactions in a block.
