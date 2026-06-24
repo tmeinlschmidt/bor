@@ -108,7 +108,7 @@ func (api *API) replayBlockTransactions(ctx context.Context, block *types.Block,
 		// stateDiff is computed on a pre-tx copy, since the trace run below
 		// advances statedb for the following transactions.
 		if set.stateDiff {
-			sd, err := api.parityStateDiffFor(ctx, tx, message, txctx, blockCtx, statedb.Copy(), nil)
+			sd, err := api.parityStateDiffFor(ctx, tx, message, txctx, blockCtx, statedb.Copy(), nil, false)
 			if err != nil {
 				return nil, fmt.Errorf("failed to build stateDiff for tx %d: %w", txIndex, err)
 			}

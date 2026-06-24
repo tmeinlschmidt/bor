@@ -151,10 +151,21 @@ func (api *API) traceCallExec(ctx context.Context, args ethapi.TransactionArgs, 
 	msg := args.ToMessage(blockCtx.BaseFee, true)
 	tx := args.ToTransaction(types.LegacyTxType)
 
-	// Lower the basefee to 0 to avoid breaking EVM invariants (basefee < feecap),
-	// matching eth_call simulation semantics.
-	if msg.GasPrice.Sign() == 0 {
-		blockCtx.BaseFee = new(big.Int)
+	// erigon's trace_call keeps the real basefee (so the base-fee burn appears in
+	// stateDiff) and runs with gas bailout (the sender is not debited for gas). We
+	// keep the real basefee too, but bor couples the burn (basefee), the sender
+	// debit (gasPrice) and the tip (gasPrice-basefee), and a gas price below the
+	// basefee would make the tip negative. Clamp the effective gas price up to the
+	// basefee (this matches erigon's default of gasPrice == basefee for fee-less
+	// calls and yields a zero tip); the sender's gas debit is then added back in
+	// the stateDiff (feeless=true) so only the burn/tip remain.
+	if blockCtx.BaseFee != nil && msg.GasPrice.Cmp(blockCtx.BaseFee) < 0 {
+		msg.GasPrice = new(big.Int).Set(blockCtx.BaseFee)
+		// Keep the fee cap consistent with the effective price so buyGas's
+		// balance check (fee cap based) matches the actual debit (price based).
+		if msg.GasFeeCap != nil && msg.GasFeeCap.Cmp(msg.GasPrice) < 0 {
+			msg.GasFeeCap = new(big.Int).Set(msg.GasPrice)
+		}
 	}
 	if msg.BlobGasFeeCap != nil && msg.BlobGasFeeCap.BitLen() == 0 {
 		blockCtx.BlobBaseFee = new(big.Int)
@@ -165,7 +176,7 @@ func (api *API) traceCallExec(ctx context.Context, args ethapi.TransactionArgs, 
 	// stateDiff is computed on a pre-call copy, since the trace run below advances
 	// the shared statedb (which trace_callMany reuses across calls).
 	if set.stateDiff {
-		sd, err := api.parityStateDiffFor(ctx, tx, msg, new(Context), blockCtx, statedb.Copy(), nil)
+		sd, err := api.parityStateDiffFor(ctx, tx, msg, new(Context), blockCtx, statedb.Copy(), nil, true)
 		if err != nil {
 			return nil, err
 		}

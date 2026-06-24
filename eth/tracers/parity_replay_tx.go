@@ -62,7 +62,7 @@ func (api *TraceAPI) ReplayTransaction(ctx context.Context, txHash common.Hash, 
 
 	// stateDiff is computed on a pre-tx copy (the trace run below advances statedb).
 	if set.stateDiff {
-		sd, err := api.parityStateDiffFor(ctx, tx, msg, txctx, vmctx, statedb.Copy(), nil)
+		sd, err := api.parityStateDiffFor(ctx, tx, msg, txctx, vmctx, statedb.Copy(), nil, false)
 		if err != nil {
 			return nil, err
 		}
