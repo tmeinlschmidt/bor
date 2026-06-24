@@ -151,13 +151,14 @@ func (api *API) traceCallExec(ctx context.Context, args ethapi.TransactionArgs, 
 	msg := args.ToMessage(blockCtx.BaseFee, true)
 	tx := args.ToTransaction(types.LegacyTxType)
 
-	// trace_call is a feeless simulation (erigon semantics): no gas fee is charged
-	// to the sender, the burnt contract or the coinbase — only the call's own state
-	// effects appear. Zero the message gas price and the block basefee so the state
-	// transition performs no fee accounting. traceTx runs with NoBaseFee, so the
-	// basefee<feecap invariant is not enforced.
-	msg.GasPrice = new(big.Int)
-	blockCtx.BaseFee = new(big.Int)
+	// Lower the basefee to 0 to avoid breaking EVM invariants (basefee < feecap),
+	// matching eth_call simulation semantics.
+	if msg.GasPrice.Sign() == 0 {
+		blockCtx.BaseFee = new(big.Int)
+	}
+	if msg.BlobGasFeeCap != nil && msg.BlobGasFeeCap.BitLen() == 0 {
+		blockCtx.BlobBaseFee = new(big.Int)
+	}
 
 	result := &ReplayResult{}
 
