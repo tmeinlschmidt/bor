@@ -259,12 +259,15 @@ func (api *API) parityStateDiffFor(
 	}
 
 	sd := buildParityStateDiff(pd.Pre, pd.Post)
-	// Drop accounts that were both created and destroyed within this tx: they did
-	// not exist before (per the true initial state) and do not exist after, so
-	// erigon reports no diff for them. They surface here as deletions because the
-	// prestate tracer recorded their post-creation code as "pre".
+	// erigon's CompareStates emits a deletion only for an account that existed
+	// before the tx AND does not exist after it. The prestate tracer marks an
+	// account deleted on the SELFDESTRUCT opcode without regard to a later revert,
+	// and can record a created-and-destroyed account's code as "pre". Both produce
+	// spurious deletion entries. Drop any deletion where the account still exists
+	// after execution (reverted/ineffective self-destruct) or did not exist before
+	// it (created-and-destroyed transient), checked against the true pre/post state.
 	for addr, acc := range sd {
-		if isRemovalDiff(acc.Balance) && !initial.Exist(addr) {
+		if isRemovalDiff(acc.Balance) && !(initial.Exist(addr) && !preState.Exist(addr)) {
 			delete(sd, addr)
 		}
 	}
