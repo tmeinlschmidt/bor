@@ -54,6 +54,17 @@ func sdChanged(from, to interface{}) interface{} {
 	return map[string]interface{}{"*": map[string]interface{}{"from": from, "to": to}}
 }
 
+// isRemovalDiff reports whether a per-field diff value is a removal ("-"),
+// i.e. the account was deleted. Used to identify deletion entries.
+func isRemovalDiff(v interface{}) bool {
+	m, ok := v.(map[string]interface{})
+	if !ok {
+		return false
+	}
+	_, ok = m["-"]
+	return ok
+}
+
 // balVal/nonceVal/codeVal return a JSON-encodable value for the field, with
 // EVM-empty defaults (0 balance, 0 nonce, empty code).
 func balVal(a *prestateAccount) *hexutil.Big {
@@ -202,12 +213,18 @@ func (api *API) parityStateDiffFor(
 	prestate := "prestateTracer"
 	cfg := &TraceConfig{
 		Tracer:       &prestate,
-		TracerConfig: json.RawMessage(`{"diffMode":true,"excludeCreatedDestroyed":true}`),
+		TracerConfig: json.RawMessage(`{"diffMode":true}`),
 	}
 	if baseConfig != nil {
 		cfg.Reexec = baseConfig.Reexec
 		cfg.Timeout = baseConfig.Timeout
 	}
+
+	// Snapshot the true pre-execution state. erigon's CompareStates omits any
+	// account that did not exist before the tx and does not exist after it
+	// (created-and-destroyed transients, e.g. CREATE2 gas tokens minted+freed in
+	// one tx). traceTx mutates preState, so capture existence beforehand.
+	initial := preState.Copy()
 
 	// The native prestate tracer doesn't track the Bor base-fee recipient (burnt
 	// contract), so snapshot its balance before/after the (re-)execution and add
@@ -242,6 +259,15 @@ func (api *API) parityStateDiffFor(
 	}
 
 	sd := buildParityStateDiff(pd.Pre, pd.Post)
+	// Drop accounts that were both created and destroyed within this tx: they did
+	// not exist before (per the true initial state) and do not exist after, so
+	// erigon reports no diff for them. They surface here as deletions because the
+	// prestate tracer recorded their post-creation code as "pre".
+	for addr, acc := range sd {
+		if isRemovalDiff(acc.Balance) && !initial.Exist(addr) {
+			delete(sd, addr)
+		}
+	}
 	if burnPre != nil {
 		addBalanceOnlyDiff(sd, burnAddr, burnPre, preState.GetBalance(burnAddr).ToBig())
 	}
